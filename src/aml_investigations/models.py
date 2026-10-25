@@ -17,8 +17,9 @@ import enum
 import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PlainSerializer
 
 
 def _utcnow() -> datetime:
@@ -321,3 +322,201 @@ class CaseSummary(BaseModel):
 # Money appears in alert payloads and (later) computed findings. It is
 # represented as Decimal end to end and is never computed by a model.
 Money = Decimal
+
+
+def _decimal_as_str(value: Decimal) -> str:
+    """Render a Decimal as a plain decimal string (never scientific
+    notation, never through a float), so money in JSON payloads is
+    exact to the cent on every round trip."""
+    return format(value, "f")
+
+
+#: A Decimal that serialises to JSON as a string. JSON numbers pass
+#: through binary floats in most tooling; money in this system never
+#: does. Parsers still receive a Decimal on the way back in.
+MoneyAmount = Annotated[
+    Decimal, PlainSerializer(_decimal_as_str, return_type=str, when_used="json")
+]
+
+
+# ---------------------------------------------------------------------------
+# Transactions, typology rules, and findings (R3, Law 4)
+# ---------------------------------------------------------------------------
+
+
+class Transaction(BaseModel):
+    """One transaction on a subject account, as delivered by the
+    core-banking feed and stored, evidence-backed, on the case.
+
+    ``cash`` marks physical-currency transactions — the only ones the
+    CTR threshold and the structuring typology speak about. ``channel``
+    (branch, wire, ach, check, card, internal) is carried for the
+    record; the typology rules read amount, direction, timing, and
+    the cash flag.
+    """
+
+    transaction_id: str
+    account_id: str
+    posted_at: datetime
+    direction: str = Field(description="credit | debit")
+    amount: MoneyAmount = Field(gt=0)
+    currency: str = "USD"
+    channel: str = Field(description="branch | wire | ach | check | card | internal")
+    cash: bool = False
+    counterparty: str | None = None
+    memo: str = ""
+    balance_after: MoneyAmount | None = None
+
+
+class AccountProfile(BaseModel):
+    """Core-banking facts about an account that the typology engine
+    reads alongside its transactions: when the account opened (the
+    dormancy clock can start there), its type, and the activity the
+    customer profile led the bank to expect."""
+
+    account_id: str
+    customer_id: str
+    opened_on: date
+    account_type: str = Field(description="e.g. personal_checking, business_checking.")
+    expected_monthly_amount: MoneyAmount | None = None
+    expected_monthly_count: int | None = None
+
+
+class TransactionBatch(BaseModel):
+    """One ingestion of transactions into a case's file.
+
+    The batch's canonical content is captured as a hash-chained
+    evidence item (``evidence_seq``) — the typology engine reads only
+    the stored records this batch created, so every finding traces
+    back to evidence with a hash. Re-delivering the identical batch
+    for the same case is an idempotent no-op.
+    """
+
+    batch_id: str = Field(default_factory=lambda: _new_id("batch"))
+    case_id: str
+    account_id: str
+    source_ref: str
+    content_sha256: str
+    transaction_count: int
+    evidence_seq: int | None = None
+    ingested_by: str
+    ingested_at: datetime = Field(default_factory=_utcnow)
+
+
+class RulePack(BaseModel):
+    """A versioned pack of typology thresholds (Law 4's rules, as data).
+
+    A pack is identified by (``pack_id``, ``version``) and is
+    immutable once registered: changing a threshold means registering
+    a new version, never editing this one — findings keep the version
+    that produced them, and findings from different versions coexist
+    and are distinguishable. ``content_hash`` is computed at
+    registration over the canonical thresholds.
+    """
+
+    pack_id: str = Field(description="Rule pack family, e.g. 'harborline-typologies'.")
+    version: str = Field(description="Publisher's version label, e.g. '2026.10.1'.")
+    source_note: str = ""
+    content_hash: str = ""
+
+    # Structuring: cash transactions inside [band_low, ctr_threshold),
+    # at least min_count of them, aggregating to at least the CTR
+    # threshold inside a window.
+    structuring_ctr_threshold: MoneyAmount = Decimal("10000")
+    structuring_band_low: MoneyAmount = Decimal("9000")
+    structuring_min_count: int = 3
+    structuring_window_days: int = 7
+
+    # Velocity: the last observation_days of the stream against the
+    # account's own preceding baseline; fires on the count multiple,
+    # with the amount multiple reported alongside.
+    velocity_observation_days: int = 7
+    velocity_min_baseline_days: int = 60
+    velocity_count_multiple: Decimal = Decimal("5")
+    velocity_min_observation_count: int = 5
+
+    # Dormancy-then-burst: a gap of at least min_gap_days, then at
+    # least min_burst_count transactions totalling at least
+    # min_burst_amount inside burst_days of activity resuming.
+    dormancy_min_gap_days: int = 180
+    dormancy_burst_days: int = 3
+    dormancy_min_burst_count: int = 2
+    dormancy_min_burst_amount: MoneyAmount = Decimal("5000")
+
+    # Round amounts: whole multiples of round_unit at or above
+    # round_min_amount; fires on count + share + total together.
+    round_unit: MoneyAmount = Decimal("1000")
+    round_min_amount: MoneyAmount = Decimal("5000")
+    round_min_count: int = 5
+    round_min_share: Decimal = Decimal("0.5")
+    round_min_total: MoneyAmount = Decimal("25000")
+
+    # Rapid in-out: a credit of at least in_out_min_amount whose
+    # funds are disbursed (pass-through fraction or more) within
+    # in_out_window_hours.
+    in_out_window_hours: int = 72
+    in_out_min_amount: MoneyAmount = Decimal("10000")
+    in_out_pass_through_fraction: Decimal = Decimal("0.9")
+
+
+class TypologyRun(BaseModel):
+    """One typology-engine run over one case under one rule pack.
+
+    ``input_fingerprint`` hashes the exact stored input (transaction
+    ids + batch hashes + profile), which is what makes a re-run with
+    the same pack over the same input idempotent: it returns the
+    existing run instead of duplicating findings or evidence. A new
+    pack version — or new transactions — is a new, distinguishable
+    run.
+    """
+
+    run_id: str = Field(default_factory=lambda: _new_id("trun"))
+    case_id: str
+    account_id: str
+    actor: str
+    run_at: datetime = Field(default_factory=_utcnow)
+    rule_pack_id: str
+    rule_pack_version: str
+    input_fingerprint: str
+    transaction_count: int = 0
+    finding_count: int = 0
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the typology_findings evidence item recording this run.",
+    )
+
+
+class TypologyFinding(BaseModel):
+    """One computed typology hit over a case's stored transactions.
+
+    A finding is arithmetic, not opinion: it names the exact
+    transactions involved, carries its figures as exact decimal
+    strings (money never passes through a float), and records the
+    rule pack id + version whose thresholds produced it. Findings are
+    leads for the investigation (R4) — they decide nothing.
+    """
+
+    finding_id: str = Field(default_factory=lambda: _new_id("find"))
+    case_id: str
+    run_id: str
+    typology_id: str = Field(
+        description="structuring | velocity | dormancy_then_burst | "
+        "round_amount | rapid_in_out"
+    )
+    variant: str | None = Field(
+        default=None,
+        description="Typology variant where one exists: structuring "
+        "reports same_day | multi_day.",
+    )
+    account_id: str
+    rule_pack_id: str
+    rule_pack_version: str
+    transaction_ids: list[str] = Field(default_factory=list)
+    figures: dict[str, str] = Field(
+        default_factory=dict,
+        description="Computed figures, as exact decimal strings.",
+    )
+    window_start: date | None = None
+    window_end: date | None = None
+    detail: str = Field(description="The rule that fired, in words.")
+    created_at: datetime = Field(default_factory=_utcnow)

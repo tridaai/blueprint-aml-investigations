@@ -11,14 +11,20 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from .models import (
+    AccountProfile,
     Alert,
     AuditEvent,
     Case,
     EvidenceItem,
     ListKind,
     ListSnapshot,
+    RulePack,
     ScreeningHit,
     ScreeningRun,
+    Transaction,
+    TransactionBatch,
+    TypologyFinding,
+    TypologyRun,
 )
 
 
@@ -115,3 +121,76 @@ class ScreeningListSource(Protocol):
     production; a reference JSON file in the blueprint)."""
 
     def list_snapshots(self) -> list[ListSnapshot]: ...
+
+
+@runtime_checkable
+class TransactionSource(Protocol):
+    """The core-banking transaction feed: an account's profile and
+    its transaction stream. The contract is a full-history pull —
+    the stream covers the account from opening — which is what lets
+    the dormancy check measure the gap from the opening date. A
+    deployment wires this to the bank's core; the blueprint ships a
+    reference feed whose streams actually contain the patterns the
+    seed alerts describe."""
+
+    def list_account_ids(self) -> list[str]: ...
+
+    def get_profile(self, account_id: str) -> AccountProfile | None: ...
+
+    def get_transactions(self, account_id: str) -> list[Transaction]: ...
+
+
+@runtime_checkable
+class RulePackSource(Protocol):
+    """Where rule-pack definitions come from (the bank's typology
+    rule book, versioned; a reference JSON file in the blueprint)."""
+
+    def list_rule_packs(self) -> list[RulePack]: ...
+
+
+@runtime_checkable
+class TypologyStore(Protocol):
+    """Persistence for transaction batches/records, account
+    profiles, rule packs, typology runs, and findings.
+
+    Rule packs, like list snapshots, have no update or delete path:
+    a registered pack never mutates (Law 4's versioning). Transaction
+    records are only ever appended by batch ingestion, and findings
+    only by an engine run.
+    """
+
+    def save_rule_pack(self, pack: RulePack) -> RulePack: ...
+
+    def get_rule_pack(self, pack_id: str, version: str) -> RulePack | None: ...
+
+    def list_rule_packs(self) -> list[RulePack]: ...
+
+    def save_account_profile(self, profile: AccountProfile) -> AccountProfile: ...
+
+    def get_account_profile(self, account_id: str) -> AccountProfile | None: ...
+
+    def add_transaction_batch(self, batch: TransactionBatch) -> TransactionBatch: ...
+
+    def get_transaction_batch(
+        self, case_id: str, content_sha256: str
+    ) -> TransactionBatch | None: ...
+
+    def list_transaction_batches(self, case_id: str) -> list[TransactionBatch]: ...
+
+    def add_transactions(
+        self, case_id: str, batch_id: str, transactions: list[Transaction]
+    ) -> None: ...
+
+    def list_transactions(self, case_id: str) -> list[Transaction]: ...
+
+    def add_typology_run(self, run: TypologyRun) -> TypologyRun: ...
+
+    def list_typology_runs(self, case_id: str) -> list[TypologyRun]: ...
+
+    def get_typology_run_by_fingerprint(
+        self, case_id: str, pack_id: str, version: str, fingerprint: str
+    ) -> TypologyRun | None: ...
+
+    def add_finding(self, finding: TypologyFinding) -> TypologyFinding: ...
+
+    def list_findings(self, case_id: str) -> list[TypologyFinding]: ...

@@ -79,6 +79,33 @@ class HitNotFoundError(ScreeningError):
     """The named screening hit does not exist."""
 
 
+class TypologyError(AmlError):
+    """Base class for typology-engine (Law 4) refusals."""
+
+
+class RulePackImmutableError(TypologyError):
+    """A rule pack with this id + version is already registered with
+    different thresholds. Rule packs never mutate: a changed
+    threshold is a new version, so findings keep the rules that
+    produced them."""
+
+
+class RulePackNotFoundError(TypologyError):
+    """A typology run named a rule pack id + version that has not
+    been registered."""
+
+
+class NoTransactionsError(TypologyError):
+    """A typology run was requested for a case with no ingested
+    transactions. The engine reads only stored, evidence-backed
+    transaction records — it never computes over ad-hoc input."""
+
+
+class TransactionMismatchError(TypologyError):
+    """A transaction batch named an account other than the case's
+    account, or mixed accounts inside one batch."""
+
+
 class SanctionsHitBlocksCloseError(IllegalTransitionError):
     """A plain close was attempted on a case with an unresolved
     sanctions hit. The case is in a must-escalate posture: the lawful
