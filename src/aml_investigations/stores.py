@@ -21,6 +21,8 @@ from .models import (
     AccountProfile,
     AuditEvent,
     Case,
+    DispositionConfirmation,
+    DispositionRecord,
     EvidenceItem,
     InvestigationRecord,
     ListKind,
@@ -50,6 +52,8 @@ class InMemoryCaseStore:
         self._typology_runs: list[TypologyRun] = []
         self._findings: dict[str, TypologyFinding] = {}
         self._investigation_records: list[InvestigationRecord] = []
+        self._dispositions: list[DispositionRecord] = []
+        self._confirmations: list[DispositionConfirmation] = []
         self._lock = threading.Lock()
 
     def ping(self) -> bool:
@@ -289,6 +293,49 @@ class InMemoryCaseStore:
         for record in self._investigation_records:
             if record.record_id == record_id:
                 return record.model_copy(deep=True)
+        return None
+
+    # --- dispositions (R5): append-only records + confirmations -----
+    def add_disposition(self, record: DispositionRecord) -> DispositionRecord:
+        with self._lock:
+            self._dispositions.append(record.model_copy(deep=True))
+        return record
+
+    def list_dispositions(self, case_id: str) -> list[DispositionRecord]:
+        records = [r for r in self._dispositions if r.case_id == case_id]
+        return [
+            r.model_copy(deep=True)
+            for r in sorted(records, key=lambda r: (r.decided_at, r.disposition_id))
+        ]
+
+    def get_disposition(self, disposition_id: str) -> DispositionRecord | None:
+        for record in self._dispositions:
+            if record.disposition_id == disposition_id:
+                return record.model_copy(deep=True)
+        return None
+
+    def add_confirmation(
+        self, confirmation: DispositionConfirmation
+    ) -> DispositionConfirmation:
+        with self._lock:
+            self._confirmations.append(confirmation.model_copy(deep=True))
+        return confirmation
+
+    def list_confirmations(
+        self, case_id: str
+    ) -> list[DispositionConfirmation]:
+        confs = [c for c in self._confirmations if c.case_id == case_id]
+        return [
+            c.model_copy(deep=True)
+            for c in sorted(confs, key=lambda c: (c.decided_at, c.confirmation_id))
+        ]
+
+    def get_confirmation_for(
+        self, disposition_id: str
+    ) -> DispositionConfirmation | None:
+        for confirmation in self._confirmations:
+            if confirmation.disposition_id == disposition_id:
+                return confirmation.model_copy(deep=True)
         return None
 
 
@@ -738,4 +785,79 @@ class SqlCaseStore:
         )
         return (
             InvestigationRecord.model_validate_json(row["payload"]) if row else None
+        )
+
+    # --- dispositions (R5): append-only records + confirmations -----
+    def add_disposition(self, record: DispositionRecord) -> DispositionRecord:
+        self._execute(
+            "INSERT INTO dispositions (disposition_id, case_id, outcome,"
+            " decided_at, payload) VALUES (?, ?, ?, ?, ?)",
+            (
+                record.disposition_id,
+                record.case_id,
+                record.outcome.value,
+                record.decided_at.isoformat(),
+                record.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return record
+
+    def list_dispositions(self, case_id: str) -> list[DispositionRecord]:
+        rows = self._fetchall(
+            "SELECT payload FROM dispositions WHERE case_id = ?"
+            " ORDER BY decided_at ASC, disposition_id ASC",
+            (case_id,),
+        )
+        return [DispositionRecord.model_validate_json(r["payload"]) for r in rows]
+
+    def get_disposition(self, disposition_id: str) -> DispositionRecord | None:
+        row = self._fetchone(
+            "SELECT payload FROM dispositions WHERE disposition_id = ?",
+            (disposition_id,),
+        )
+        return DispositionRecord.model_validate_json(row["payload"]) if row else None
+
+    def add_confirmation(
+        self, confirmation: DispositionConfirmation
+    ) -> DispositionConfirmation:
+        self._execute(
+            "INSERT INTO disposition_confirmations (confirmation_id,"
+            " disposition_id, case_id, decided_at, payload)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                confirmation.confirmation_id,
+                confirmation.disposition_id,
+                confirmation.case_id,
+                confirmation.decided_at.isoformat(),
+                confirmation.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return confirmation
+
+    def list_confirmations(
+        self, case_id: str
+    ) -> list[DispositionConfirmation]:
+        rows = self._fetchall(
+            "SELECT payload FROM disposition_confirmations WHERE case_id = ?"
+            " ORDER BY decided_at ASC, confirmation_id ASC",
+            (case_id,),
+        )
+        return [
+            DispositionConfirmation.model_validate_json(r["payload"]) for r in rows
+        ]
+
+    def get_confirmation_for(
+        self, disposition_id: str
+    ) -> DispositionConfirmation | None:
+        row = self._fetchone(
+            "SELECT payload FROM disposition_confirmations"
+            " WHERE disposition_id = ?",
+            (disposition_id,),
+        )
+        return (
+            DispositionConfirmation.model_validate_json(row["payload"])
+            if row
+            else None
         )
