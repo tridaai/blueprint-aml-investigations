@@ -19,6 +19,7 @@ from aml_investigations.dispositions import DispositionService
 from aml_investigations.evidence import EvidenceService
 from aml_investigations.intake import IntakeService, ListAlertFeed
 from aml_investigations.investigation import InvestigationService
+from aml_investigations.media import AdverseMediaService, ListMediaFeed
 from aml_investigations.models import Alert, RulePack
 from aml_investigations.object_store import LocalObjectStore
 from aml_investigations.profiles import ProfileService
@@ -80,6 +81,7 @@ def services(tmp_path: Path) -> Services:
         disposition_store=store,
         seal_store=store,
         quarantine=quarantine,
+        media_store=store,
     )
     dispositions = DispositionService(
         store, store, store, store, evidence, workflow, seal_store=store
@@ -125,6 +127,17 @@ def services(tmp_path: Path) -> Services:
         approval_store=store,
         quarantine=quarantine,
     )
+    media_feed = ListMediaFeed([])
+    media = AdverseMediaService(
+        store,
+        store,
+        evidence,
+        media_feed,
+        seal_store=store,
+        quarantine=quarantine,
+        profile_service=profiles,
+        typology_store=store,
+    )
     settings = Settings(
         database_url=None,
         sqlite_path=tmp_path / "aml.db",
@@ -136,6 +149,7 @@ def services(tmp_path: Path) -> Services:
         screening_lists_path=tmp_path / "lists.json",
         transaction_streams_path=tmp_path / "streams.json",
         typology_rules_path=tmp_path / "rules.json",
+        adverse_media_path=tmp_path / "media.json",
         log_level="INFO",
     )
     return Services(
@@ -164,6 +178,8 @@ def services(tmp_path: Path) -> Services:
         reviews=reviews,
         quarantine=quarantine,
         profiles=profiles,
+        media_feed=media_feed,
+        media=media,
     )
 
 

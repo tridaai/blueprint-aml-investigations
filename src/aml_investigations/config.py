@@ -26,6 +26,7 @@ class Settings:
     screening_lists_path: Path
     transaction_streams_path: Path
     typology_rules_path: Path
+    adverse_media_path: Path
     log_level: str
 
     @property
@@ -82,6 +83,11 @@ def load_settings() -> Settings:
             os.environ.get("TYPOLOGY_RULES_PATH"),
             Path("./data/typology_rules.json"),
             repo_root / "data" / "typology_rules.json",
+        ),
+        adverse_media_path=_resolve(
+            os.environ.get("ADVERSE_MEDIA_PATH"),
+            Path("./data/adverse_media.json"),
+            repo_root / "data" / "adverse_media.json",
         ),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
     )

@@ -32,6 +32,7 @@ from .models import (
     LegalHoldEvent,
     ListKind,
     ListSnapshot,
+    MediaAssessment,
     NarrativeVerification,
     ProfileView,
     RulePack,
@@ -72,6 +73,7 @@ class InMemoryCaseStore:
         self._reviews: list[ContinuingReview] = []
         self._review_dispositions: list[ContinuingReviewDisposition] = []
         self._profile_views: list[ProfileView] = []
+        self._media_assessments: list[MediaAssessment] = []
         self._lock = threading.Lock()
 
     def ping(self) -> bool:
@@ -574,6 +576,30 @@ class InMemoryCaseStore:
     def latest_profile_view(self, customer_id: str) -> ProfileView | None:
         views = self.list_profile_views(customer_id)
         return views[-1] if views else None
+
+    # -- adverse-media assessments (R12): append-only --------
+
+    def add_assessment(self, assessment: MediaAssessment) -> MediaAssessment:
+        with self._lock:
+            self._media_assessments.append(assessment.model_copy(deep=True))
+        return assessment
+
+    def list_assessments(self, case_id: str) -> list[MediaAssessment]:
+        found = [
+            a for a in self._media_assessments if a.case_id == case_id
+        ]
+        return [
+            a.model_copy(deep=True)
+            for a in sorted(found, key=lambda a: a.article_id)
+        ]
+
+    def get_assessment(
+        self, assessment_id: str
+    ) -> MediaAssessment | None:
+        for assessment in self._media_assessments:
+            if assessment.assessment_id == assessment_id:
+                return assessment.model_copy(deep=True)
+        return None
 
 
 class SqlCaseStore:
@@ -1445,3 +1471,47 @@ class SqlCaseStore:
             (customer_id,),
         )
         return ProfileView.model_validate_json(row["payload"]) if row else None
+
+    # -- adverse-media assessments (R12): append-only --------
+
+    def add_assessment(self, assessment: MediaAssessment) -> MediaAssessment:
+        self._execute(
+            "INSERT INTO media_assessments (assessment_id, case_id,"
+            " customer_id, article_id, band, assessed_at, payload)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                assessment.assessment_id,
+                assessment.case_id,
+                assessment.customer_id,
+                assessment.article_id,
+                assessment.band.value,
+                assessment.assessed_at.isoformat(),
+                assessment.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return assessment
+
+    def list_assessments(self, case_id: str) -> list[MediaAssessment]:
+        rows = self._fetchall(
+            "SELECT payload FROM media_assessments WHERE case_id = ?"
+            " ORDER BY article_id ASC",
+            (case_id,),
+        )
+        return [
+            MediaAssessment.model_validate_json(r["payload"]) for r in rows
+        ]
+
+    def get_assessment(
+        self, assessment_id: str
+    ) -> MediaAssessment | None:
+        row = self._fetchone(
+            "SELECT payload FROM media_assessments"
+            " WHERE assessment_id = ?",
+            (assessment_id,),
+        )
+        return (
+            MediaAssessment.model_validate_json(row["payload"])
+            if row
+            else None
+        )

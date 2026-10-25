@@ -19,8 +19,10 @@ from .dispositions import DispositionService
 from .evidence import EvidenceService
 from .intake import IntakeService, ReferenceAlertFeed
 from .investigation import InvestigationService
+from .media import AdverseMediaService, ReferenceMediaFeed
 from .object_store import LocalObjectStore, S3ObjectStore
 from .ports import (
+    AdverseMediaSource,
     AlertSource,
     CaseStore,
     ObjectStore,
@@ -63,6 +65,8 @@ class Services:
     reviews: ContinuingReviewService
     quarantine: QuarantineService
     profiles: ProfileService
+    media_feed: AdverseMediaSource
+    media: AdverseMediaService
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -151,6 +155,22 @@ def build_services(settings: Settings | None = None) -> Services:
         approval_store=store,
         quarantine=quarantine,
     )
+    # R12: the adverse-media service searches the reference
+    # corpus (a labelled stand-in for a licensed news database),
+    # ingests candidates as evidence, and scores them in code.
+    # The investigation graph reads its assessments through the
+    # media store port.
+    media_feed = ReferenceMediaFeed(settings.adverse_media_path)
+    media = AdverseMediaService(
+        store,
+        store,
+        evidence,
+        media_feed,
+        seal_store=store,
+        quarantine=quarantine,
+        profile_service=profiles,
+        typology_store=store,
+    )
     investigations = InvestigationService(
         store,
         store,
@@ -161,6 +181,7 @@ def build_services(settings: Settings | None = None) -> Services:
         seal_store=store,
         quarantine=quarantine,
         profile_service=profiles,
+        media_store=store,
     )
     return Services(
         settings=settings,
@@ -184,4 +205,6 @@ def build_services(settings: Settings | None = None) -> Services:
         reviews=reviews,
         quarantine=quarantine,
         profiles=profiles,
+        media_feed=media_feed,
+        media=media,
     )
