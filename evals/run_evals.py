@@ -27,6 +27,13 @@ Zero-tolerance counters:
   - statement figures not tracing to citations (R4). must be 0
   - investigation re-runs duplicating records (R4).. must be 0
   - investigation hypotheses wrong on planted cases (R4) must be 0
+  - anonymous/system dispositions accepted (R5) .... must be 0
+  - dispositions without a record accepted (R5) .... must be 0
+  - sanctions-blocked closures accepted (R5) ...... must be 0
+  - self-confirmations accepted (R5) ............... must be 0
+  - free-text-only rationale accepted (R5) ......... must be 0
+  - stale dispositions left unflagged (R5) ......... must be 0
+  - superseded-record citations accepted (R5) ...... must be 0
 
 Exit code 0 iff the gate passes.
 """
@@ -42,7 +49,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from aml_investigations.composer import numeric_tokens, tokens_of  # noqa: E402
+from aml_investigations.dispositions import (  # noqa: E402
+    FLAG_DISPOSITION_STALE,
+    DispositionService,
+)
 from aml_investigations.errors import (  # noqa: E402
+    DispositionRefusedError,
     IllegalTransitionError,
     InvestigationRefusedError,
     NoTransactionsError,
@@ -63,7 +75,9 @@ from aml_investigations.models import (  # noqa: E402
     AccountProfile,
     Alert,
     CaseStatus,
+    ConfirmationOutcome,
     Disposition,
+    DispositionOutcome,
     HitStatus,
     ListEntry,
     ListKind,
@@ -230,6 +244,16 @@ def main() -> int:
         "investigation_open_questions_missing": 0,
         "investigation_figure_provenance_failures": 0,
         "investigation_rerun_duplicated": 0,
+        # R5 disposition counters
+        "dispositions_recorded": 0,
+        "disposition_anonymous_accepted": 0,
+        "disposition_without_record_accepted": 0,
+        "disposition_sanctions_blocked_accepted": 0,
+        "disposition_self_confirmation_accepted": 0,
+        "disposition_free_text_only_accepted": 0,
+        "disposition_stale_unflagged": 0,
+        "disposition_stale_citation_accepted": 0,
+        "disposition_positive_paths_failed": 0,
     }
 
     store = InMemoryCaseStore()
@@ -634,7 +658,9 @@ def main() -> int:
     # question; a poisoned record must be refused at the gate; a
     # re-run over unchanged inputs must not duplicate the record,
     # and new evidence must produce the next version with a diff.
-    investigations = InvestigationService(store, store, store, store, evidence)
+    investigations = InvestigationService(
+        store, store, store, store, evidence, disposition_store=store
+    )
     resolver = CitationResolver(store, evidence)
 
     def check_record(record, expected_label, *, sof_question: bool) -> None:
@@ -909,7 +935,260 @@ def main() -> int:
     ):
         counters["investigation_hypothesis_incomplete"] += 1
 
-    print("Blueprint #15 evals — R1+R2+R3+R4 counters")
+    # -- Scenario 8 (R5): the disposition gate. -------------------------
+    # Every refusal the gate exists to make is probed: anonymous and
+    # system actors, a disposition with no investigation record to
+    # rely on, free text offered instead of coded rationale, a
+    # citation of a superseded record, closing outcomes over an
+    # unresolved sanctions hit, and the dispositioning analyst
+    # confirming their own closure. The positive paths must all land:
+    # an adverse close parks for confirmation and closes only when a
+    # second person confirms; a benign close lands at once; monitor,
+    # escalate and send-back route where they should; and when a new
+    # record version supersedes the one a disposition relied on, the
+    # case is flagged DISPOSITION_STALE until a fresh disposition
+    # answers it.
+    dispositions = DispositionService(store, store, store, store, evidence, workflow)
+
+    def attempt_disposition(case_id, counter=None, **kwargs):
+        """A disposition attempt. With ``counter`` set (a refusal
+        probe), a wrongly-accepted attempt increments it; positive
+        paths pass no counter and are checked by their callers."""
+        base = dict(
+            analyst_id="e.okafor",
+            analyst_role="analyst",
+            outcome=DispositionOutcome.CLOSE_NO_ACTION,
+            rationale_codes=["NO_SUSPICIOUS_ACTIVITY_IDENTIFIED"],
+            record_id="",
+            record_version=0,
+        )
+        base.update(kwargs)
+        try:
+            record = dispositions.record_disposition(case_id, **base)
+        except DispositionRefusedError:
+            return None
+        if counter is not None:
+            counters[counter] += 1
+        return record
+
+    def to_gate(case_id: str) -> None:
+        workflow.transition(case_id, CaseStatus.AWAITING_ANALYST, actor="eval")
+
+    # 8a: the structuring case (inv1, record v2, adverse hypothesis).
+    to_gate(inv1)
+    attempt_disposition(
+        inv1, "disposition_anonymous_accepted",
+        analyst_id="investigation-service",
+        record_id=record_v2.record_id, record_version=record_v2.version,
+    )
+    attempt_disposition(
+        inv1, "disposition_anonymous_accepted",
+        analyst_id="",
+        record_id=record_v2.record_id, record_version=record_v2.version,
+    )
+    attempt_disposition(
+        inv1, "disposition_free_text_only_accepted",
+        rationale_codes=[],
+        record_id=record_v2.record_id, record_version=record_v2.version,
+    )
+    attempt_disposition(
+        inv1, "disposition_stale_citation_accepted",
+        record_id=record_v1.record_id, record_version=record_v1.version,
+    )
+    parked = attempt_disposition(
+        inv1,
+        rationale_codes=["BENIGN_EXPLANATION_DOCUMENTED"],
+        record_id=record_v2.record_id, record_version=record_v2.version,
+    )
+    if parked is None or not parked.requires_confirmation:
+        counters["disposition_positive_paths_failed"] += 1
+    else:
+        counters["dispositions_recorded"] += 1
+        if store.get_case(inv1).status is not CaseStatus.PENDING_CONFIRMATION:
+            counters["disposition_positive_paths_failed"] += 1
+        try:
+            dispositions.confirm_disposition(
+                inv1,
+                confirmer_id="e.okafor",
+                confirmer_role="l2_reviewer",
+                outcome=ConfirmationOutcome.CONFIRMED,
+            )
+            counters["disposition_self_confirmation_accepted"] += 1
+        except DispositionRefusedError:
+            pass
+        dispositions.confirm_disposition(
+            inv1,
+            confirmer_id="m.osei",
+            confirmer_role="l2_reviewer",
+            outcome=ConfirmationOutcome.CONFIRMED,
+        )
+        if store.get_case(inv1).status is not CaseStatus.CLOSED:
+            counters["disposition_positive_paths_failed"] += 1
+
+    # 8b: a case with no investigation record cannot be dispositioned;
+    # once investigated (benign), its close lands at once.
+    bare = case_ids["EVAL-003"]
+    for target in (
+        CaseStatus.ASSEMBLING,
+        CaseStatus.INVESTIGATING,
+        CaseStatus.AWAITING_ANALYST,
+    ):
+        workflow.transition(bare, target, actor="eval")
+    attempt_disposition(
+        bare, "disposition_without_record_accepted",
+        record_id="INV-none", record_version=1,
+    )
+    workflow.transition(bare, CaseStatus.INVESTIGATING, actor="eval")
+    bare_record = investigations.run_investigation(bare, actor="eval-analyst")
+    to_gate(bare)
+    closed = attempt_disposition(
+        bare,
+        record_id=bare_record.record_id, record_version=bare_record.version,
+    )
+    if closed is None or store.get_case(bare).status is not CaseStatus.CLOSED:
+        counters["disposition_positive_paths_failed"] += 1
+    else:
+        counters["dispositions_recorded"] += 1
+
+    # 8c: staleness. inv3 is dispositioned to monitoring on record
+    # v1; new evidence produces record v2; the case must be flagged
+    # until a fresh disposition on v2 answers it.
+    to_gate(inv3)
+    monitored = dispositions.record_disposition(
+        inv3,
+        analyst_id="e.okafor",
+        analyst_role="analyst",
+        outcome=DispositionOutcome.CLOSE_MONITOR,
+        rationale_codes=["PATTERN_EXPLAINED_MONITOR_ACTIVITY"],
+        record_id=record_inv3.record_id,
+        record_version=record_inv3.version,
+        review_period_days=30,
+    )
+    counters["dispositions_recorded"] += 1
+    if store.get_case(inv3).status is not CaseStatus.MONITORING:
+        counters["disposition_positive_paths_failed"] += 1
+    workflow.transition(inv3, CaseStatus.INVESTIGATING, actor="eval")
+    extra3 = [
+        etxn(f"I3-R{i}", "ACCT-I3", date(2026, 3, 12) + timedelta(days=i),
+             "10000", channel="wire")
+        for i in range(10)
+    ]
+    typologies.ingest_transactions(
+        inv3, extra3, source_ref="core-banking:ACCT-I3:delta", actor="eval-feed"
+    )
+    typologies.run_typologies(inv3, "eval-pack", "1.0", actor="eval-runner")
+    record_inv3_v2 = investigations.run_investigation(inv3, actor="eval-analyst")
+    if record_inv3_v2.version != 2:
+        counters["disposition_stale_unflagged"] += 1
+    if FLAG_DISPOSITION_STALE not in store.get_case(inv3).flags:
+        counters["disposition_stale_unflagged"] += 1
+    to_gate(inv3)
+    answered = dispositions.record_disposition(
+        inv3,
+        analyst_id="e.okafor",
+        analyst_role="senior_analyst",
+        outcome=DispositionOutcome.ESCALATE_L2,
+        rationale_codes=["CONFLICTING_EVIDENCE"],
+        record_id=record_inv3_v2.record_id,
+        record_version=record_inv3_v2.version,
+    )
+    counters["dispositions_recorded"] += 1
+    if FLAG_DISPOSITION_STALE in store.get_case(inv3).flags:
+        counters["disposition_stale_unflagged"] += 1
+    if dispositions.status_of(monitored) != "superseded":
+        counters["disposition_stale_unflagged"] += 1
+
+    # 8d: the sanctions case. The customer himself is on sanctions
+    # v2 (the scenario-5 delta): closing outcomes are refused at the
+    # gate; escalate_sar routes to the SAR queue; a send-back for
+    # the missing source-of-funds evidence is honoured.
+    disp_intake = IntakeService(
+        store,
+        ListAlertFeed([
+            Alert(
+                alert_id="EVAL-D1", rule_id="TM-SANCTIONS-02",
+                customer_id="CUST-D1", account_id="ACCT-D1",
+                severity="critical", detected_on="2026-10-25",
+                summary="Disposition eval: listed customer.",
+                raw={
+                    "customer_name": "Daniel Okafor",
+                    "customer_dob": "1985-03-04",
+                    "customer_identifiers": ["PP-NG-2210"],
+                    "counterparties": [],
+                },
+            ),
+        ]),
+        evidence,
+    )
+    d1 = disp_intake.open_case("EVAL-D1").case_id
+    workflow.transition(d1, CaseStatus.ASSEMBLING, actor="eval")
+    screening.screen_case(
+        d1,
+        {ListKind.SANCTIONS: "2026.10.2", ListKind.PEP: "2026.10.1"},
+        actor="eval",
+    )
+    d1_profile = AccountProfile(
+        account_id="ACCT-D1", customer_id="CUST-D1",
+        opened_on=date(2025, 5, 1), account_type="personal_checking",
+    )
+    d1_stream = [
+        etxn("D1-1", "ACCT-D1", date(2026, 10, 2), "2400.00", channel="ach"),
+        etxn("D1-2", "ACCT-D1", date(2026, 10, 16), "2400.00", channel="ach"),
+    ]
+    typologies.ingest_from_source(
+        d1, ListTransactionFeed([d1_profile], {"ACCT-D1": d1_stream}),
+        actor="eval-feed",
+    )
+    typologies.run_typologies(d1, "eval-pack", "1.0", actor="eval-runner")
+    workflow.transition(d1, CaseStatus.INVESTIGATING, actor="eval")
+    d1_record = investigations.run_investigation(d1, actor="eval-analyst")
+    if d1_record.hypothesis.label != "sanctions_match":
+        counters["investigation_hypothesis_wrong"] += 1
+    to_gate(d1)
+    attempt_disposition(
+        d1, "disposition_sanctions_blocked_accepted",
+        record_id=d1_record.record_id, record_version=d1_record.version,
+    )
+    attempt_disposition(
+        d1, "disposition_sanctions_blocked_accepted",
+        outcome=DispositionOutcome.CLOSE_MONITOR,
+        rationale_codes=["EMERGING_PATTERN_WATCH"],
+        review_period_days=30,
+        record_id=d1_record.record_id, record_version=d1_record.version,
+    )
+    routed = dispositions.record_disposition(
+        d1,
+        analyst_id="e.okafor",
+        analyst_role="analyst",
+        outcome=DispositionOutcome.ESCALATE_SAR,
+        rationale_codes=["SANCTIONS_MATCH_SUSPECTED"],
+        record_id=d1_record.record_id,
+        record_version=d1_record.version,
+    )
+    counters["dispositions_recorded"] += 1
+    if store.get_case(d1).status is not CaseStatus.SAR_PENDING:
+        counters["disposition_positive_paths_failed"] += 1
+    workflow.transition(d1, CaseStatus.INVESTIGATING, actor="eval")
+    to_gate(d1)
+    dispositions.record_disposition(
+        d1,
+        analyst_id="e.okafor",
+        analyst_role="analyst",
+        outcome=DispositionOutcome.REQUEST_MORE_EVIDENCE,
+        rationale_codes=["SOURCE_OF_FUNDS_MISSING"],
+        record_id=d1_record.record_id,
+        record_version=d1_record.version,
+        missing_evidence=["source_of_funds_documentation"],
+    )
+    counters["dispositions_recorded"] += 1
+    if store.get_case(d1).status is not CaseStatus.INVESTIGATING:
+        counters["disposition_positive_paths_failed"] += 1
+    try:
+        evidence.verify_chain(d1)
+    except Exception:
+        counters["chains_failed"] += 1
+
+    print("Blueprint #15 evals — R1+R2+R3+R4+R5 counters")
     for key, value in counters.items():
         print(f"  {key}: {value}")
     zero_tolerance = [
@@ -936,6 +1215,14 @@ def main() -> int:
         "investigation_open_questions_missing",
         "investigation_figure_provenance_failures",
         "investigation_rerun_duplicated",
+        "disposition_anonymous_accepted",
+        "disposition_without_record_accepted",
+        "disposition_sanctions_blocked_accepted",
+        "disposition_self_confirmation_accepted",
+        "disposition_free_text_only_accepted",
+        "disposition_stale_unflagged",
+        "disposition_stale_citation_accepted",
+        "disposition_positive_paths_failed",
     ]
     passed = all(counters[k] == 0 for k in zero_tolerance) and counters["cases_opened"] == len(ALERTS)
     print("GATE: PASS" if passed else "GATE: FAIL")
