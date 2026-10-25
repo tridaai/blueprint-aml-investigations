@@ -27,6 +27,9 @@ class Settings:
     transaction_streams_path: Path
     typology_rules_path: Path
     adverse_media_path: Path
+    model_profiles_path: Path
+    model_prices_path: Path
+    model_profile: str
     log_level: str
 
     @property
@@ -89,5 +92,19 @@ def load_settings() -> Settings:
             Path("./data/adverse_media.json"),
             repo_root / "data" / "adverse_media.json",
         ),
+        model_profiles_path=_resolve(
+            os.environ.get("MODEL_PROFILES_PATH"),
+            Path("./data/model_profiles.json"),
+            repo_root / "data" / "model_profiles.json",
+        ),
+        model_prices_path=_resolve(
+            os.environ.get("MODEL_PRICES_PATH"),
+            Path("./data/model_prices.json"),
+            repo_root / "data" / "model_prices.json",
+        ),
+        # R13: the deployment's own model profile. Wiring resolves
+        # it through the gateway at startup — an unknown or
+        # unconfigured profile refuses the boot, never a first call.
+        model_profile=os.environ.get("AML_MODEL_PROFILE", "offline"),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
     )

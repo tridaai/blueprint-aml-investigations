@@ -645,6 +645,7 @@ class InvestigationService:
         quarantine=None,
         profile_service=None,
         media_store: MediaStore | None = None,
+        gateway=None,
     ) -> None:
         self._store = store
         self._screening = screening_store
@@ -679,6 +680,12 @@ class InvestigationService:
         # values (band, score, categories) plus the article's
         # fenced outlet, never article prose.
         self._media_store = media_store
+        # R13: when a model gateway is wired, composition goes
+        # through it — the gateway resolves the named profile
+        # fail-closed, enforces the per-case budget, and ledgers
+        # every call under purpose record_draft. Bare stacks keep
+        # the composer module's own resolution.
+        self._gateway = gateway
         self._resolver = CitationResolver(store, evidence)
         builder = StateGraph(_State)
         builder.add_node("assemble", self._assemble)
@@ -710,7 +717,14 @@ class InvestigationService:
                 f"case {case_id} is {case.status.value}; the "
                 "investigation graph works a case in 'investigating'"
             )
-        composer = get_composer(profile)
+        if self._gateway is not None:
+            from .gateway import PURPOSE_RECORD_DRAFT
+
+            composer = self._gateway.composer_for(
+                profile, case_id=case_id, purpose=PURPOSE_RECORD_DRAFT
+            )
+        else:
+            composer = get_composer(profile)
         fingerprint = _input_fingerprint(
             self._store,
             self._screening,

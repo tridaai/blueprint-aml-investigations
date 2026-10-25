@@ -106,6 +106,9 @@ SYSTEM_EVIDENCE_KINDS = frozenset(
         # funnel never double-records either.
         "adverse_media",
         "media_assessment",
+        # R13: a model-budget refusal is a system-generated
+        # gateway record, written by the gateway itself.
+        "model_budget_refusal",
         QUARANTINE_KIND,
         REVIEW_KIND,
     }

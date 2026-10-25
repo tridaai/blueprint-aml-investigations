@@ -171,6 +171,7 @@ class SarNarrativeService:
         seal_store: SealStore | None = None,
         review_store: ContinuingReviewStore | None = None,
         quarantine=None,
+        gateway=None,
     ) -> None:
         self._store = store
         self._records = records
@@ -195,6 +196,14 @@ class SarNarrativeService:
         # section with a statement citing the review and the prior
         # filing — the chain made visible in the narrative itself.
         self._reviews = review_store
+        # R13: when a model gateway is wired, drafting composes
+        # through it — profile resolution is fail-closed, the
+        # per-case budget is enforced before transport, and every
+        # statement's call is priced into the cost ledger under
+        # purpose sar_draft. This is the configured path that
+        # replaces R6's unconfigured hosted-frontier stub; bare
+        # stacks keep the composer module's own resolution.
+        self._gateway = gateway
         self._resolver = CitationResolver(store, evidence)
 
     # -- refusals -----------------------------------------------------
@@ -338,7 +347,14 @@ class SarNarrativeService:
                 "than letting the narrative total transactions itself",
             )
 
-        composer = get_composer(profile)
+        if self._gateway is not None:
+            from .gateway import PURPOSE_SAR_DRAFT
+
+            composer = self._gateway.composer_for(
+                profile, case_id=case_id, purpose=PURPOSE_SAR_DRAFT
+            )
+        else:
+            composer = get_composer(profile)
         sections = self._compose_sections(
             case, current, alert, subject, composer
         )

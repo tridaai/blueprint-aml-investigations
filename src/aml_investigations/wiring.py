@@ -17,6 +17,7 @@ from .clocks import RegulatoryClockService
 from .config import Settings, load_settings
 from .dispositions import DispositionService
 from .evidence import EvidenceService
+from .gateway import ModelGateway, load_gateway_files
 from .intake import IntakeService, ReferenceAlertFeed
 from .investigation import InvestigationService
 from .media import AdverseMediaService, ReferenceMediaFeed
@@ -67,6 +68,7 @@ class Services:
     profiles: ProfileService
     media_feed: AdverseMediaSource
     media: AdverseMediaService
+    gateway: ModelGateway
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -84,6 +86,22 @@ def build_services(settings: Settings | None = None) -> Services:
     else:
         objects = LocalObjectStore(settings.object_store_dir)
     evidence = EvidenceService(store, objects, seal_store=store)
+    # R13: the model gateway — profiles + price table loaded and
+    # validated fail-closed from the governed data files, the
+    # deployment's own profile (AML_MODEL_PROFILE) resolved at
+    # startup, every drafting call priced into the cost ledger,
+    # budget refusals recorded on the case (ledger + audit +
+    # chain). A broken profile table or an unconfigured active
+    # profile refuses the boot here, not a later call.
+    gateway = ModelGateway(
+        load_gateway_files(
+            settings.model_profiles_path, settings.model_prices_path
+        ),
+        store,
+        audit_store=store,
+        evidence=evidence,
+        active_profile=settings.model_profile,
+    )
     # R10: the quarantine service (Law 7). It writes through the
     # evidence funnel, so it is built after the funnel and then
     # attached as the funnel's scan hook; every ingestion and
@@ -120,6 +138,7 @@ def build_services(settings: Settings | None = None) -> Services:
         seal_store=store,
         review_store=store,
         quarantine=quarantine,
+        gateway=gateway,
     )
     approvals = SarApprovalService(
         store, store, store, store, sar, evidence, workflow, seal_store=store
@@ -182,6 +201,7 @@ def build_services(settings: Settings | None = None) -> Services:
         quarantine=quarantine,
         profile_service=profiles,
         media_store=store,
+        gateway=gateway,
     )
     return Services(
         settings=settings,
@@ -207,4 +227,5 @@ def build_services(settings: Settings | None = None) -> Services:
         profiles=profiles,
         media_feed=media_feed,
         media=media,
+        gateway=gateway,
     )

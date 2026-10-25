@@ -19,8 +19,17 @@ inline. Two rules bind every profile, enforced in code:
   defined now and exercised when a deployment wires a key — until
   then, selecting it is a loud refusal
   (:class:`ModelProfileNotConfiguredError`), never a silent
-  fall-back to offline. R13 builds the full gateway (profiles,
-  routing, cost ledger) on this port.
+  fall-back to offline.
+
+R13 built the full gateway on this port (``gateway.py``): profiles
+as governed data, real HTTP adapters for the live profiles, the
+per-case budget, and the cost ledger. Where a gateway is wired —
+every production wiring — services resolve their composer through
+it, and the classes below serve the bare stacks (tests that build
+services by hand): ``OfflineComposer`` renders identically either
+way, and ``HostedFrontierComposer`` remains the loud refusal a
+gateway-less stack gives for a live profile, so the two paths can
+never disagree about whether a live call happened.
 """
 
 from __future__ import annotations
@@ -108,13 +117,16 @@ class OfflineComposer:
 
 
 class HostedFrontierComposer:
-    """The live profile's interface — defined, not yet exercised.
+    """The live profile's interface for gateway-less stacks.
 
-    A deployment wires this profile to a hosted frontier model
-    behind the same contract: the model receives the draft's values
-    and the cited records, and its text passes the same figure gate
-    before it may stand as a finding statement. Until a key is
-    wired, composing through this profile is refused loudly.
+    The configured live path is the model gateway (R13,
+    ``gateway.py``): its Anthropic adapter calls a hosted frontier
+    model behind this same contract — the model receives the
+    draft's values and the cited records, and its text passes the
+    same figure gate before it may stand as a finding statement.
+    A stack built without a gateway has no configured endpoint at
+    all, so composing through this class is refused loudly rather
+    than falling back.
     """
 
     profile_name = "hosted-frontier"
