@@ -21,7 +21,9 @@ from .models import (
     InvestigationRecord,
     ListKind,
     ListSnapshot,
+    NarrativeVerification,
     RulePack,
+    SarNarrative,
     ScreeningHit,
     ScreeningRun,
     Transaction,
@@ -251,3 +253,34 @@ class DispositionStore(Protocol):
     def get_confirmation_for(
         self, disposition_id: str
     ) -> DispositionConfirmation | None: ...
+
+
+@runtime_checkable
+class SarNarrativeStore(Protocol):
+    """Persistence for SAR narrative drafts and verification runs (R6).
+
+    Both are append-only. A narrative is never updated or deleted:
+    a re-draft is the next version, and standing (draft / verified /
+    stale / superseded) is derived from the version chain, the
+    investigation-record versions, and the verification runs —
+    never stored as an edit. A verification run answers one
+    narrative version; a later run sits alongside the earlier one.
+    """
+
+    def add_narrative(self, narrative: SarNarrative) -> SarNarrative: ...
+
+    def list_narratives(self, case_id: str) -> list[SarNarrative]: ...
+
+    def get_narrative(self, narrative_id: str) -> SarNarrative | None: ...
+
+    def add_verification(
+        self, verification: NarrativeVerification
+    ) -> NarrativeVerification: ...
+
+    def list_verifications(
+        self, case_id: str
+    ) -> list[NarrativeVerification]: ...
+
+    def get_verification_for(
+        self, narrative_id: str
+    ) -> NarrativeVerification | None: ...

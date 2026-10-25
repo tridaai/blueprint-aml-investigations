@@ -167,6 +167,32 @@ class DispositionRefusedError(DispositionError):
         super().__init__(f"disposition refused [{reason}]: {message}")
 
 
+class SarNarrativeError(AmlError):
+    """Base class for SAR narrative (R6) refusals."""
+
+
+class SarNarrativeRefusedError(SarNarrativeError):
+    """SAR narrative drafting or verification was refused.
+
+    Every refusal carries a named ``reason``: case_not_sar_pending,
+    no_investigation_record, sar_disposition_missing,
+    sar_disposition_not_current, subject_identification_missing,
+    flagged_amounts_not_statable, narrative_record_missing. The
+    refusal is written to the case's audit log before it is raised
+    (drafting refusals; verification verdicts are records, not
+    refusals — an unverifiable narrative is stored as a failed
+    verification, never raised as one).
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(f"SAR narrative refused [{reason}]: {message}")
+
+
+class NarrativeNotFoundError(SarNarrativeError):
+    """The named SAR narrative does not exist (on the named case)."""
+
+
 class SanctionsHitBlocksCloseError(IllegalTransitionError):
     """A plain close was attempted on a case with an unresolved
     sanctions hit. The case is in a must-escalate posture: the lawful
