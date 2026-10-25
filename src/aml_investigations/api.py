@@ -15,8 +15,11 @@ citation verifier, and read the latest verification record, the
 approval and custody surface (R7): the dual-control decision,
 sealing, legal hold and export, and the clock surface (R8): a
 case's regulatory clocks, the clock board, and the clock
-escalation queue. No endpoint files a SAR — none exists; the
-blueprint ends at an approved, sealed case file.
+escalation queue, and the quarantine surface (R10): a case's
+quarantine records with their review status, the cross-case
+quarantine queue, and the named-analyst review act. No endpoint
+files a SAR — none exists; the blueprint ends at an approved,
+sealed case file.
 """
 
 from __future__ import annotations
@@ -47,6 +50,8 @@ from .errors import (
     InvestigationStateError,
     NarrativeNotFoundError,
     NoTransactionsError,
+    QuarantineNotFoundError,
+    QuarantineRefusedError,
     ReviewNotFoundError,
     RulePackImmutableError,
     RulePackNotFoundError,
@@ -268,6 +273,15 @@ class ReviewTickRequest(BaseModel):
     actor: str = Field(default="clock-service", min_length=1)
 
 
+class QuarantineReviewRequest(BaseModel):
+    """A named analyst's review of one quarantine record (R10).
+    An audit act: it records who looked and what they noted; it
+    never un-fences the content."""
+
+    reviewer: str = Field(min_length=1)
+    note: str = ""
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"detail": message})
 
@@ -396,6 +410,18 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     @app.exception_handler(ReviewNotFoundError)
     async def _review_not_found(_request: Request, exc: ReviewNotFoundError):
+        return _error(404, str(exc))
+
+    @app.exception_handler(QuarantineRefusedError)
+    async def _quarantine_refused(
+        _request: Request, exc: QuarantineRefusedError
+    ):
+        return _error(422, str(exc))
+
+    @app.exception_handler(QuarantineNotFoundError)
+    async def _quarantine_not_found(
+        _request: Request, exc: QuarantineNotFoundError
+    ):
         return _error(404, str(exc))
 
     @app.get("/health")
@@ -1037,6 +1063,48 @@ def create_app(services: Services | None = None) -> FastAPI:
     @app.get("/queues/escalations")
     async def escalation_queue():
         return services.dispositions.escalation_queue()
+
+    # -- quarantine surface (R10, Law 7) -----------------------------
+
+    @app.get("/cases/{case_id}/quarantine")
+    async def case_quarantine(case_id: str):
+        """One case's quarantine records with their derived review
+        status: the item quarantined, the pattern matched, the
+        span — the injection attempt as a case event."""
+        records = services.quarantine.records_for(case_id)
+        return {
+            "case_id": case_id,
+            "quarantine": [
+                services.quarantine.view(record) for record in records
+            ],
+        }
+
+    @app.get("/queues/quarantine")
+    async def quarantine_queue():
+        """Every quarantine record across every case — the
+        analyst's review work list."""
+        return [
+            entry.model_dump(mode="json")
+            for entry in services.quarantine.queue()
+        ]
+
+    @app.post(
+        "/cases/{case_id}/quarantine/{quarantine_seq}/review",
+        status_code=201,
+    )
+    async def review_quarantine(
+        case_id: str, quarantine_seq: int, payload: QuarantineReviewRequest
+    ):
+        """Record a named analyst's review of one quarantine
+        record. Review is an audit act — the content stays fenced
+        everywhere it is consumed, permanently."""
+        review = services.quarantine.mark_reviewed(
+            case_id,
+            quarantine_seq,
+            reviewer=payload.reviewer,
+            note=payload.note,
+        )
+        return review.model_dump(mode="json")
 
     return app
 

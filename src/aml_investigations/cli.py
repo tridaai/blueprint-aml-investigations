@@ -113,6 +113,17 @@ Usage:
                                     the scheduler tick: open a
                                     review for every case whose
                                     cycle's review deadline arrived
+    aml-agent quarantine <case_id>  the case's quarantine records:
+                                    item, pattern, span, review
+                                    status (R10, Law 7)
+    aml-agent quarantine-queue      every quarantine record across
+                                    every case — the review work list
+    aml-agent quarantine-review <case_id> <quarantine_seq>
+              --reviewer ID [--note TEXT]
+                                    record a named analyst's review
+                                    of one quarantine record — an
+                                    audit act; the content stays
+                                    fenced permanently
 """
 
 from __future__ import annotations
@@ -259,6 +270,14 @@ def main(argv: list[str] | None = None) -> int:
     p_open_due = sub.add_parser("open-due-reviews")
     p_open_due.add_argument("--as-of", default=None)
     p_open_due.add_argument("--actor", default="clock-service")
+    p_quarantine = sub.add_parser("quarantine")
+    p_quarantine.add_argument("case_id")
+    sub.add_parser("quarantine-queue")
+    p_q_review = sub.add_parser("quarantine-review")
+    p_q_review.add_argument("case_id")
+    p_q_review.add_argument("quarantine_seq", type=int)
+    p_q_review.add_argument("--reviewer", required=True)
+    p_q_review.add_argument("--note", default="")
     args = parser.parse_args(argv)
 
     services = build_services()
@@ -735,6 +754,32 @@ def main(argv: list[str] | None = None) -> int:
                     indent=2,
                 )
             )
+        elif args.command == "quarantine":
+            records = services.quarantine.records_for(args.case_id)
+            print(
+                json.dumps(
+                    [services.quarantine.view(r) for r in records],
+                    indent=2,
+                )
+            )
+        elif args.command == "quarantine-queue":
+            print(
+                json.dumps(
+                    [
+                        e.model_dump(mode="json")
+                        for e in services.quarantine.queue()
+                    ],
+                    indent=2,
+                )
+            )
+        elif args.command == "quarantine-review":
+            review = services.quarantine.mark_reviewed(
+                args.case_id,
+                args.quarantine_seq,
+                reviewer=args.reviewer,
+                note=args.note,
+            )
+            print(json.dumps(review.model_dump(mode="json"), indent=2))
     except AmlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
