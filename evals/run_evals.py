@@ -52,6 +52,11 @@ Zero-tolerance counters:
   - mutations of a sealed case accepted (R7) ...... must be 0
   - tampered exports passing verification (R7) .... must be 0
   - seals with an incomplete manifest accepted (R7) must be 0
+  - clocks satisfied without a review disposition (R9) must be 0
+  - second concurrent reviews accepted (R9) ...... must be 0
+  - reviews with uncited window activity accepted (R9) must be 0
+  - no-file cycles without coded rationale (R9) ... must be 0
+  - continuing cycle chains broken (R9) ........... must be 0
 
 Exit code 0 iff the gate passes.
 """
@@ -77,6 +82,7 @@ from aml_investigations.dispositions import (  # noqa: E402
 from aml_investigations.errors import (  # noqa: E402
     ApprovalRefusedError,
     CaseSealedError,
+    ContinuingReviewRefusedError,
     DispositionRefusedError,
     IllegalTransitionError,
     InvestigationRefusedError,
@@ -111,10 +117,13 @@ from aml_investigations.models import (  # noqa: E402
     ListEntry,
     ListKind,
     ListSnapshot,
+    ReviewOutcome,
     RulePack,
+    ScreeningSubject,
     Transaction,
 )
 from aml_investigations.object_store import LocalObjectStore  # noqa: E402
+from aml_investigations.reviews import ContinuingReviewService  # noqa: E402
 from aml_investigations.sar import SarNarrativeService  # noqa: E402
 from aml_investigations.screening import (  # noqa: E402
     ReferenceScreeningFeed,
@@ -320,6 +329,15 @@ def main() -> int:
         "clock_escalations_recorded": 0,
         "clock_continuing_clocks_started": 0,
         "clock_positive_paths_failed": 0,
+        # R9 continuing-review counters
+        "reviews_opened": 0,
+        "reviews_dispositioned": 0,
+        "review_clock_satisfied_without_disposition": 0,
+        "review_second_concurrent_accepted": 0,
+        "review_uncited_activity_accepted": 0,
+        "review_no_file_without_codes_accepted": 0,
+        "review_cycle_chain_broken": 0,
+        "review_positive_paths_failed": 0,
     }
 
     store = InMemoryCaseStore()
@@ -1991,7 +2009,337 @@ def main() -> int:
     if forged_view.filing.state is ClockState.CLOSED_NO_FILE:
         counters["clock_positive_paths_failed"] += 1
 
-    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8 counters")
+    # -- Scenario 12 (R9): continuing-activity reviews. -------------
+    # On its own stack: a prior filing stands; a new alert inside
+    # the window starts the clock at intake; the review assembles
+    # cited window activity, and the cycle stays unanswered until
+    # a named analyst's recorded disposition — an opened review
+    # satisfies nothing, a second concurrent review is refused, an
+    # uncited review fails its gate, a codeless no-file is
+    # refused, file_continuing lands end to end into a verified
+    # narrative that cites the review and the prior case, and a
+    # no-file cycle chains the next cycle by review id.
+    r_store = InMemoryCaseStore()
+    r_evidence = EvidenceService(
+        r_store,
+        LocalObjectStore(
+            Path(tempfile.mkdtemp(prefix="aml-evals-reviews-"))
+        ),
+        seal_store=r_store,
+    )
+    r_workflow = CaseWorkflow(r_store, screening_store=r_store)
+    r_clocks = RegulatoryClockService(
+        r_store, r_store, r_store, r_evidence,
+        approvals=r_store, review_store=r_store,
+    )
+    r_screening = ScreeningService(
+        r_store, r_store, r_evidence, seal_store=r_store
+    )
+    r_typologies = TypologyService(
+        r_store, r_store, r_evidence, seal_store=r_store
+    )
+    r_investigations = InvestigationService(
+        r_store, r_store, r_store, r_store, r_evidence,
+        disposition_store=r_store, seal_store=r_store,
+    )
+    r_dispositions = DispositionService(
+        r_store, r_store, r_store, r_store, r_evidence, r_workflow,
+        seal_store=r_store,
+    )
+    r_sar = SarNarrativeService(
+        r_store, r_store, r_store, r_store, r_evidence,
+        approval_store=r_store, seal_store=r_store,
+        review_store=r_store,
+    )
+    r_approvals = SarApprovalService(
+        r_store, r_store, r_store, r_store, r_sar, r_evidence,
+        r_workflow, seal_store=r_store,
+    )
+    r_reviews = ContinuingReviewService(
+        r_store, r_store, r_store, r_store, r_store, r_store,
+        r_store, r_evidence, r_clocks, r_dispositions,
+        seal_store=r_store,
+    )
+    r_screening.ingest_snapshot(SANCTIONS_V1, actor="eval-feed")
+    r_typologies.register_rule_pack(
+        RulePack(pack_id="eval-pack", version="1.0")
+    )
+    r_feed_alerts: list[Alert] = []
+
+    def r_intake() -> IntakeService:
+        return IntakeService(
+            r_store, ListAlertFeed(list(r_feed_alerts)), r_evidence,
+            clock_service=r_clocks,
+        )
+
+    def r_alert(alert_id, customer, account, detected):
+        return Alert(
+            alert_id=alert_id,
+            rule_id="TM-STRUCTURING-01",
+            customer_id=customer,
+            account_id=account,
+            severity="high",
+            detected_on=detected.isoformat(),
+            summary="Cash deposits clustering under the CTR threshold.",
+            raw={
+                "customer_name": "Rhea Vance",
+                "customer_dob": "1979-02-14",
+                "customer_identifiers": ["PP-EV-9001"],
+                "counterparties": [],
+            },
+        )
+
+    def r_subject(customer):
+        return ScreeningSubject(
+            subject_ref=f"customer:{customer}",
+            name="Rhea Vance",
+            role="customer",
+            dob=date(1979, 2, 14),
+            identifiers=["PP-EV-9001"],
+        )
+
+    def r_walk(alert_id, stream):
+        """Intake to the analyst gate, over the eval stack."""
+        case_id = r_intake().open_case(alert_id).case_id
+        alert = next(
+            a for a in r_feed_alerts if a.alert_id == alert_id
+        )
+        r_workflow.transition(case_id, CaseStatus.ASSEMBLING, actor="eval")
+        r_screening.screen_case(
+            case_id,
+            {ListKind.SANCTIONS: "2026.10.1"},
+            actor="eval",
+            subjects=[r_subject(alert.customer_id)],
+        )
+        profile = AccountProfile(
+            account_id=alert.account_id,
+            customer_id=alert.customer_id,
+            opened_on=date(2025, 12, 1),
+            account_type="business_checking",
+        )
+        r_typologies.ingest_from_source(
+            case_id,
+            ListTransactionFeed([profile], {alert.account_id: stream}),
+            actor="eval-feed",
+        )
+        r_typologies.run_typologies(
+            case_id, "eval-pack", "1.0", actor="eval-runner"
+        )
+        r_workflow.transition(
+            case_id, CaseStatus.INVESTIGATING, actor="eval"
+        )
+        record = r_investigations.run_investigation(
+            case_id, actor="eval-analyst"
+        )
+        r_workflow.transition(
+            case_id, CaseStatus.AWAITING_ANALYST, actor="eval"
+        )
+        return case_id, record
+
+    def r_structuring(account, base, prefix):
+        return [
+            etxn(f"{prefix}1", account, base + timedelta(days=1),
+                 "9500", cash=True, channel="branch"),
+            etxn(f"{prefix}2", account, base + timedelta(days=3),
+                 "9600", cash=True, channel="branch"),
+            etxn(f"{prefix}3", account, base + timedelta(days=5),
+                 "9700", cash=True, channel="branch"),
+        ]
+
+    def r_filed_prior(alert_id, customer, account, detected, prefix):
+        r_feed_alerts.append(
+            r_alert(alert_id, customer, account, detected)
+        )
+        case_id, record = r_walk(
+            alert_id, r_structuring(account, detected, prefix)
+        )
+        r_dispositions.record_disposition(
+            case_id,
+            analyst_id="e.okafor",
+            analyst_role="analyst",
+            outcome=DispositionOutcome.ESCALATE_SAR,
+            rationale_codes=["STRUCTURING_SUSPECTED"],
+            record_id=record.record_id,
+            record_version=record.version,
+        )
+        r_sar.draft_narrative(case_id, actor="sar-drafting-service")
+        r_approvals.decide_narrative(
+            case_id,
+            approver_id="m.rivera",
+            approver_role="senior_analyst",
+            outcome=ApprovalOutcome.APPROVED,
+        )
+        case = r_store.get_case(case_id)
+        if case.status is not CaseStatus.FILED_SAR:
+            counters["review_positive_paths_failed"] += 1
+        return case_id, r_clocks.filing_determination_date(case)
+
+    # 12a: the file-continuing cycle, end to end.
+    r_prior, r_det = r_filed_prior(
+        "EVAL-R-PRIOR", "CUST-R9", "ACCT-R9", date(2026, 8, 3), "RP-"
+    )
+    r_feed_alerts.append(
+        r_alert("EVAL-R-NEW", "CUST-R9", "ACCT-R9",
+                r_det + timedelta(days=5))
+    )
+    r_window = [etxn("RW-0", "ACCT-R9", r_det - timedelta(days=40),
+                     "4200", channel="ach")]
+    r_window += r_structuring("ACCT-R9", r_det + timedelta(days=9), "RW-")
+    r_case, r_record = r_walk("EVAL-R-NEW", r_window)
+    if r_record.hypothesis.label != "structuring":
+        counters["review_positive_paths_failed"] += 1
+    r_review = r_reviews.open_review(r_case, actor="b.osei")
+    counters["reviews_opened"] += 1
+    if (
+        r_review.cycle != 1
+        or r_review.prior_case_id != r_prior
+        or r_review.continuation_assessment
+        != "continues_filed_typology"
+        or r_reviews.verify_review(r_review)
+    ):
+        counters["review_positive_paths_failed"] += 1
+
+    # An opened review does not satisfy the clock.
+    r_mid = r_clocks.case_clocks(r_case, as_of=r_det + timedelta(days=95))
+    if (
+        r_mid.continuing_activity is None
+        or r_mid.continuing_activity.answered_by_review_id is not None
+        or r_mid.continuing_activity.state
+        in (ClockState.SATISFIED, ClockState.CLOSED_NO_FILE)
+    ):
+        counters["review_clock_satisfied_without_disposition"] += 1
+
+    # A second concurrent review is refused.
+    try:
+        r_reviews.open_review(r_case, actor="b.osei")
+        counters["review_second_concurrent_accepted"] += 1
+    except ContinuingReviewRefusedError:
+        pass
+
+    # An uncited activity item fails the review's own gate.
+    r_first = r_review.activity[0]
+    r_tampered = r_review.model_copy(
+        update={
+            "activity": [
+                r_first.model_copy(update={"citations": []}),
+                *r_review.activity[1:],
+            ]
+        }
+    )
+    if not r_reviews.verify_review(r_tampered):
+        counters["review_uncited_activity_accepted"] += 1
+
+    r_reviews.record_review_disposition(
+        r_case,
+        r_review.review_id,
+        analyst_id="b.osei",
+        analyst_role="senior_analyst",
+        outcome=ReviewOutcome.FILE_CONTINUING,
+        rationale_codes=["STRUCTURING_SUSPECTED"],
+    )
+    counters["reviews_dispositioned"] += 1
+    r_narrative, r_verification = r_sar.draft_narrative(
+        r_case, actor="sar-drafting-service"
+    )
+    r_activity = next(
+        s for s in r_narrative.sections if s.key == "activity_summary"
+    )
+    r_opening = r_activity.statements[0]
+    if (
+        not r_verification.all_verified
+        or "continuing-activity review" not in r_opening.text
+        or r_review.review_id not in r_opening.text
+        or not any(
+            c.case_id == r_prior for c in r_opening.citations
+        )
+    ):
+        counters["review_positive_paths_failed"] += 1
+    r_approvals.decide_narrative(
+        r_case,
+        approver_id="s.ike",
+        approver_role="senior_analyst",
+        outcome=ApprovalOutcome.APPROVED,
+    )
+    r_done = r_clocks.case_clocks(r_case, as_of=r_det + timedelta(days=200))
+    if (
+        r_store.get_case(r_case).status is not CaseStatus.FILED_SAR
+        or r_done.continuing_activity is None
+        or r_done.continuing_activity.state is not ClockState.SATISFIED
+        or r_done.continuing_activity.answered_by_review_id
+        != r_review.review_id
+    ):
+        counters["review_positive_paths_failed"] += 1
+
+    # 12b: the no-file cycle and the rolling chain, on a second
+    # customer whose window activity is the benign cadence.
+    r_prior_b, r_det_b = r_filed_prior(
+        "EVAL-RB-PRIOR", "CUST-R9B", "ACCT-R9B",
+        date(2026, 8, 3), "RB-",
+    )
+    r_feed_alerts.append(
+        r_alert("EVAL-RB-NEW", "CUST-R9B", "ACCT-R9B",
+                r_det_b + timedelta(days=5))
+    )
+    r_cadence = [
+        etxn(f"RN-{i}", "ACCT-R9B",
+             r_det_b + timedelta(days=10 + 10 * i),
+             "9500", cash=True, channel="branch")
+        for i in range(9)
+    ]
+    r_case_b, r_record_b = r_walk("EVAL-RB-NEW", r_cadence)
+    if r_record_b.hypothesis.label != "no_adverse_pattern":
+        counters["review_positive_paths_failed"] += 1
+    r_review_b = r_reviews.open_review(r_case_b, actor="b.osei")
+    counters["reviews_opened"] += 1
+    if (
+        r_review_b.continuation_assessment
+        != "no_adverse_activity_in_window"
+    ):
+        counters["review_positive_paths_failed"] += 1
+    try:
+        r_reviews.record_review_disposition(
+            r_case_b,
+            r_review_b.review_id,
+            analyst_id="b.osei",
+            analyst_role="senior_analyst",
+            outcome=ReviewOutcome.NO_FILE_THIS_CYCLE,
+            rationale_codes=[],
+            note="looked fine",
+        )
+        counters["review_no_file_without_codes_accepted"] += 1
+    except ContinuingReviewRefusedError:
+        pass
+    r_disp_b = r_reviews.record_review_disposition(
+        r_case_b,
+        r_review_b.review_id,
+        analyst_id="b.osei",
+        analyst_role="senior_analyst",
+        outcome=ReviewOutcome.NO_FILE_THIS_CYCLE,
+        rationale_codes=["ACTIVITY_CEASED"],
+    )
+    counters["reviews_dispositioned"] += 1
+    r_chain = r_clocks.case_clocks(
+        r_case_b, as_of=r_disp_b.decided_at.date()
+    )
+    r_history = r_chain.continuing_history
+    if (
+        len(r_history) != 2
+        or r_history[0].state is not ClockState.CLOSED_NO_FILE
+        or r_history[0].answered_by_review_id != r_review_b.review_id
+        or r_history[1].cycle != 2
+        or r_history[1].prior_review_id != r_review_b.review_id
+        or r_history[1].determination_on != r_disp_b.decided_at.date()
+    ):
+        counters["review_cycle_chain_broken"] += 1
+    r_review_b2 = r_reviews.open_review(r_case_b, actor="b.osei")
+    counters["reviews_opened"] += 1
+    if (
+        r_review_b2.cycle != 2
+        or r_review_b2.prior_review_id != r_review_b.review_id
+    ):
+        counters["review_cycle_chain_broken"] += 1
+
+    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9 counters")
     for key, value in counters.items():
         print(f"  {key}: {value}")
     zero_tolerance = [
@@ -2047,6 +2395,12 @@ def main() -> int:
         "clock_duplicate_escalation_events",
         "clock_terminal_violation_undetected",
         "clock_positive_paths_failed",
+        "review_clock_satisfied_without_disposition",
+        "review_second_concurrent_accepted",
+        "review_uncited_activity_accepted",
+        "review_no_file_without_codes_accepted",
+        "review_cycle_chain_broken",
+        "review_positive_paths_failed",
     ]
     passed = all(counters[k] == 0 for k in zero_tolerance) and counters["cases_opened"] == len(ALERTS)
     print("GATE: PASS" if passed else "GATE: FAIL")

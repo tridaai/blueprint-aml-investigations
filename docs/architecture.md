@@ -569,6 +569,83 @@ system's only clocks, with nobody's calendar consulted:
   evidence chain), so there is no migration for this round and
   no stored state a hand could edit into compliance.
 
+## Continuing-activity reviews (R9) — the workflow answering the clock
+
+R8's continuing-activity clock asked a question it could not
+itself answer: has the returning subject's activity continued,
+and is a continuing SAR being filed? R9 is the workflow that
+answers it, one cycle at a time, under the same discipline as
+everything upstream (`reviews.py`):
+
+- **Assembly is citation-bound.** A `ContinuingReview` is
+  assembled per cycle over the linked case's *current*
+  investigation record. Its activity items gather, each with
+  citations that resolve under R4's `CitationResolver` (there
+  is no second resolver): the prior filing's facts (the prior
+  record's hypothesis and its approved narrative, cited across
+  the prior case's chain), the customer's cases and alerts
+  opened since the determination, the transactions posted in
+  the window (cited to their batch items), the current record's
+  hypothesis, its typology findings restated verbatim under
+  their own citations and figures, and the screening state.
+  Before the review is stored, a verification gate re-resolves
+  every citation and requires every figure the items state —
+  in text or figure map — to appear in the records they cite.
+  A review that fails the gate is refused, never stored.
+- **The continuation assessment is coded.** Derived in code
+  from the filed record's hypothesis label, the current
+  record's typology findings (each record finding's key names
+  its typology and the transactions it rests on), and which of
+  those transactions were posted inside the window:
+  `continues_filed_typology`, `new_pattern_in_window`,
+  `no_adverse_activity_in_window`, or
+  `activity_unrelated_to_filing` (the findings rest on
+  pre-window activity). The derivation's basis is stated in
+  words beside the code.
+- **Only a recorded disposition answers the clock.** A named
+  analyst (the R5 identity discipline: no system actors, roles
+  from the analyst vocabulary) records a
+  `ContinuingReviewDisposition` per cycle.
+  `file_continuing` mints an `escalate_sar` disposition through
+  the R5 gate — its vocabulary, its record citation, its
+  transition to `sar_pending` — and the R6 narrative drafted on
+  it opens its activity section with a statement citing the
+  review disposition, the review, the prior case, and the prior
+  narrative, held to the citation verifier's standard.
+  `no_file_this_cycle` is documented by coded rationale from
+  the review vocabulary family (versioned alongside the
+  disposition vocabulary).
+- **The clock learns the outcome by extension, not by fork.**
+  `RegulatoryClockService` takes an optional review store and
+  derives the cycle chain: cycle 1 from the R8 link; each
+  no-file disposition starts the next cycle at its own decision
+  date (rolling 90/120), the new cycle naming the review that
+  started it (`prior_review_id`) and the answered cycle naming
+  the review that answered it (`answered_by_review_id` /
+  `answered_outcome`). A file-continuing answer leaves its
+  cycle live against the filing deadline — only the case
+  reaching `filed_sar` satisfies it. A review opened but not
+  dispositioned changes nothing: past the filing deadline the
+  cycle escalates as overdue on R8's machinery. Without a
+  review store attached, the derivation is exactly R8's.
+  `CaseClocks` carries the full cycle history
+  (`continuing_history`); `continuing_activity` remains the
+  live cycle the escalation machinery reads.
+- **Cycle discipline.** One open review stands per cycle — a
+  second open attempt is refused. A dispositioned review is
+  immutable, and a review whose cited record has been
+  superseded stands *stale*: it cannot be dispositioned, and a
+  fresh review is opened in its place, naming the one it
+  supersedes — supersession, never an edit. Reviews and their
+  dispositions are append-only rows (migration 0008) and
+  hash-chained evidence items (`continuing_review`,
+  `continuing_review_disposition`). A scheduler tick
+  (`open_due_reviews`) opens reviews for cycles whose review
+  deadline has arrived — recording the tick as the opening
+  actor, like any other opening — and skips cases with no
+  investigation record: the tick never fabricates an
+  assessment.
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
@@ -593,8 +670,11 @@ sealed state derived from the seal/unseal history, never stored).
 R8's regulatory clocks added no tables at all — clocks are derived
 views over the case, disposition, and evidence records (see the
 clocks section above), and their escalation events ride the
-evidence chain. Later rounds add: LangGraph checkpointing on
-Postgres, and pgvector for adverse-media similarity (R12).
+evidence chain. Migration 0008 added `continuing_reviews` and
+`continuing_review_dispositions` (append-only review artefacts and
+their decisions; the clock's cycle derivation reads them). Later
+rounds add: LangGraph checkpointing on Postgres, and pgvector for
+adverse-media similarity (R12).
 
 ## Ports
 
@@ -613,6 +693,7 @@ Postgres, and pgvector for adverse-media similarity (R12).
 | `SarNarrativeStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `ApprovalStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `SealStore` | PostgreSQL via migrations | SQLite file; in-memory |
+| `ContinuingReviewStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `NarrativeComposer` (model port) | hosted frontier profile (key wired per deployment) | deterministic offline composer |
 
 The model gateway (R13) and adverse media (R12) arrive as further
