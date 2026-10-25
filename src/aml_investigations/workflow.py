@@ -19,6 +19,15 @@ wired, a plain ``closed`` transition is refused for any case with an
 unresolved sanctions hit, whatever the disposition says — the case
 must escalate, file a SAR, or have the hit cleared by an analyst
 with a recorded reason first.
+
+R5 extends the table with the disposition gate's states:
+``pending_confirmation`` (a close over an adverse hypothesis waits
+for a second pair of eyes), ``sar_pending`` (the case is routed to
+SAR drafting — the drafting itself is R6), and ``monitoring``
+(closed under enhanced monitoring, re-openable when the review
+falls due). The disposition service (``dispositions.py``) is what
+drives cases along these edges; the table stays the single source
+of which moves exist at all.
 """
 
 from __future__ import annotations
@@ -35,7 +44,15 @@ from .errors import (
     SanctionsHitBlocksCloseError,
 )
 from .logging_config import get_logger
-from .models import AuditEvent, Case, CaseStatus, Disposition, HitStatus, ListKind
+from .models import (
+    AuditEvent,
+    Case,
+    CaseStatus,
+    Disposition,
+    HitStatus,
+    ListKind,
+    ScreeningHit,
+)
 from .ports import CaseStore, ScreeningStore
 
 logger = get_logger(__name__)
@@ -51,9 +68,25 @@ TRANSITIONS: dict[CaseStatus, frozenset[CaseStatus]] = {
         {
             CaseStatus.INVESTIGATING,  # analyst sends the case back for more work
             CaseStatus.ESCALATED,
+            CaseStatus.PENDING_CONFIRMATION,  # R5: adverse close awaits L2 eyes
+            CaseStatus.SAR_PENDING,  # R5: routed to SAR drafting (R6)
+            CaseStatus.MONITORING,  # R5: closed under enhanced monitoring
             CaseStatus.CLOSED,
             CaseStatus.FILED_SAR,
         }
+    ),
+    CaseStatus.PENDING_CONFIRMATION: frozenset(
+        {
+            CaseStatus.CLOSED,  # the confirmation lands the closure
+            CaseStatus.INVESTIGATING,  # the confirmer declines: back to work
+            CaseStatus.ESCALATED,
+        }
+    ),
+    CaseStatus.SAR_PENDING: frozenset(
+        {CaseStatus.INVESTIGATING, CaseStatus.ESCALATED}
+    ),
+    CaseStatus.MONITORING: frozenset(
+        {CaseStatus.INVESTIGATING}  # the monitoring review re-opens the case
     ),
     CaseStatus.ESCALATED: frozenset(
         {CaseStatus.INVESTIGATING, CaseStatus.AWAITING_ANALYST}
@@ -61,6 +94,23 @@ TRANSITIONS: dict[CaseStatus, frozenset[CaseStatus]] = {
     CaseStatus.CLOSED: frozenset(),
     CaseStatus.FILED_SAR: frozenset(),
 }
+
+
+def unresolved_sanctions_hits(
+    screening_store: ScreeningStore, case_id: str
+) -> list[ScreeningHit]:
+    """The case's sanctions hits that are not cleared (Law 3).
+
+    One definition, shared by every gate that must respect the
+    must-escalate posture: the workflow's plain-close guard below
+    and the R5 disposition gate, which refuses close_no_action and
+    close_monitor over the same hits.
+    """
+    return [
+        h
+        for h in screening_store.list_hits(case_id)
+        if h.list_kind is ListKind.SANCTIONS and h.status is not HitStatus.CLEARED
+    ]
 
 #: Closing targets and the disposition decision each one requires.
 _CLOSING_DECISIONS = {
@@ -163,11 +213,7 @@ class CaseWorkflow:
     def _guard_sanctions_close(self, case: Case, actor: str) -> None:
         if self._screening is None:
             return
-        unresolved = [
-            h
-            for h in self._screening.list_hits(case.case_id)
-            if h.list_kind is ListKind.SANCTIONS and h.status is not HitStatus.CLEARED
-        ]
+        unresolved = unresolved_sanctions_hits(self._screening, case.case_id)
         if not unresolved:
             return
         exc = SanctionsHitBlocksCloseError(
