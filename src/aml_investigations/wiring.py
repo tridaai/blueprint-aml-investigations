@@ -28,6 +28,7 @@ from .ports import (
     ScreeningListSource,
     TransactionSource,
 )
+from .reviews import ContinuingReviewService
 from .sar import SarNarrativeService
 from .screening import ReferenceScreeningFeed, ScreeningService
 from .sealing import CaseSealingService
@@ -57,6 +58,7 @@ class Services:
     approvals: SarApprovalService
     sealing: CaseSealingService
     clocks: RegulatoryClockService
+    reviews: ContinuingReviewService
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -77,7 +79,7 @@ def build_services(settings: Settings | None = None) -> Services:
     workflow = CaseWorkflow(store, screening_store=store)
     alerts = ReferenceAlertFeed(settings.seed_alerts_path)
     clocks = RegulatoryClockService(
-        store, store, store, evidence, approvals=store
+        store, store, store, evidence, approvals=store, review_store=store
     )
     intake = IntakeService(store, alerts, evidence, clock_service=clocks)
     screening = ScreeningService(store, store, evidence, seal_store=store)
@@ -105,12 +107,26 @@ def build_services(settings: Settings | None = None) -> Services:
         evidence,
         approval_store=store,
         seal_store=store,
+        review_store=store,
     )
     approvals = SarApprovalService(
         store, store, store, store, sar, evidence, workflow, seal_store=store
     )
     sealing = CaseSealingService(
         store, store, store, store, store, evidence, store
+    )
+    reviews = ContinuingReviewService(
+        store,
+        store,
+        store,
+        store,
+        store,
+        store,
+        store,
+        evidence,
+        clocks,
+        dispositions,
+        seal_store=store,
     )
     return Services(
         settings=settings,
@@ -131,4 +147,5 @@ def build_services(settings: Settings | None = None) -> Services:
         approvals=approvals,
         sealing=sealing,
         clocks=clocks,
+        reviews=reviews,
     )

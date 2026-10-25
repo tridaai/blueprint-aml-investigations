@@ -15,6 +15,7 @@ from aml_investigations.intake import IntakeService, ListAlertFeed
 from aml_investigations.investigation import InvestigationService
 from aml_investigations.models import Alert
 from aml_investigations.object_store import LocalObjectStore
+from aml_investigations.reviews import ContinuingReviewService
 from aml_investigations.sar import SarNarrativeService
 from aml_investigations.screening import ListScreeningFeed, ScreeningService
 from aml_investigations.sealing import CaseSealingService
@@ -55,7 +56,7 @@ def services(tmp_path: Path) -> Services:
     workflow = CaseWorkflow(store, screening_store=store)
     feed = ListAlertFeed(list(SEED_ALERTS))
     clocks = RegulatoryClockService(
-        store, store, store, evidence, approvals=store
+        store, store, store, evidence, approvals=store, review_store=store
     )
     intake = IntakeService(store, feed, evidence, clock_service=clocks)
     screening = ScreeningService(store, store, evidence, seal_store=store)
@@ -80,12 +81,26 @@ def services(tmp_path: Path) -> Services:
         evidence,
         approval_store=store,
         seal_store=store,
+        review_store=store,
     )
     approvals = SarApprovalService(
         store, store, store, store, sar, evidence, workflow, seal_store=store
     )
     sealing = CaseSealingService(
         store, store, store, store, store, evidence, store
+    )
+    reviews = ContinuingReviewService(
+        store,
+        store,
+        store,
+        store,
+        store,
+        store,
+        store,
+        evidence,
+        clocks,
+        dispositions,
+        seal_store=store,
     )
     settings = Settings(
         database_url=None,
@@ -119,4 +134,5 @@ def services(tmp_path: Path) -> Services:
         approvals=approvals,
         sealing=sealing,
         clocks=clocks,
+        reviews=reviews,
     )

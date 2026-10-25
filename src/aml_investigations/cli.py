@@ -89,6 +89,30 @@ Usage:
                                     the clock escalation queue:
                                     overdue, then due, then due_soon,
                                     each entry naming its deadline
+    aml-agent open-review <case_id> [--actor A]
+                                    open the current cycle's
+                                    continuing-activity review (R9):
+                                    the window's activity assembled
+                                    over the case's current record,
+                                    verified at the citation gate
+    aml-agent review <case_id>     the case's reviews: the current
+                                    cycle's operative review, the
+                                    per-cycle history, and the cycle
+                                    clocks they answer
+    aml-agent reviews --customer ID
+                                    the customer's continuing-activity
+                                    history across their cases
+    aml-agent disposition-review <case_id> <review_id>
+              --analyst ID --role ROLE
+              --outcome file_continuing|no_file_this_cycle
+              --code CODE [--code CODE ...] [--note TEXT]
+                                    record the cycle's decision —
+                                    the only act that answers the
+                                    clock for the cycle (R9)
+    aml-agent open-due-reviews [--as-of YYYY-MM-DD] [--actor A]
+                                    the scheduler tick: open a
+                                    review for every case whose
+                                    cycle's review deadline arrived
 """
 
 from __future__ import annotations
@@ -214,6 +238,27 @@ def main(argv: list[str] | None = None) -> int:
     p_clock_board.add_argument("--as-of", default=None)
     p_clock_esc = sub.add_parser("clock-escalations")
     p_clock_esc.add_argument("--as-of", default=None)
+
+    p_open_review = sub.add_parser("open-review")
+    p_open_review.add_argument("case_id")
+    p_open_review.add_argument(
+        "--actor", default="continuing-review-service"
+    )
+    p_review = sub.add_parser("review")
+    p_review.add_argument("case_id")
+    p_reviews = sub.add_parser("reviews")
+    p_reviews.add_argument("--customer", required=True)
+    p_disp_review = sub.add_parser("disposition-review")
+    p_disp_review.add_argument("case_id")
+    p_disp_review.add_argument("review_id")
+    p_disp_review.add_argument("--analyst", required=True)
+    p_disp_review.add_argument("--role", required=True)
+    p_disp_review.add_argument("--outcome", required=True)
+    p_disp_review.add_argument("--code", action="append", default=[])
+    p_disp_review.add_argument("--note", default="")
+    p_open_due = sub.add_parser("open-due-reviews")
+    p_open_due.add_argument("--as-of", default=None)
+    p_open_due.add_argument("--actor", default="clock-service")
     args = parser.parse_args(argv)
 
     services = build_services()
@@ -612,6 +657,82 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 json.dumps(
                     [e.model_dump(mode="json") for e in queue], indent=2
+                )
+            )
+        elif args.command == "open-review":
+            review = services.reviews.open_review(
+                args.case_id, actor=args.actor
+            )
+            print(
+                json.dumps(
+                    services.reviews.review_view(review), indent=2
+                )
+            )
+        elif args.command == "review":
+            from datetime import date
+
+            clocks = services.clocks.case_clocks(
+                args.case_id, as_of=date.today()
+            )
+            print(
+                json.dumps(
+                    {
+                        "case_id": args.case_id,
+                        "current": services.reviews.current_review(
+                            args.case_id
+                        ),
+                        "history": services.reviews.reviews_for_case(
+                            args.case_id
+                        ),
+                        "continuing_cycles": [
+                            c.model_dump(mode="json")
+                            for c in clocks.continuing_history
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "reviews":
+            print(
+                json.dumps(
+                    services.reviews.history_for_customer(args.customer),
+                    indent=2,
+                )
+            )
+        elif args.command == "disposition-review":
+            from .models import ReviewOutcome
+
+            disposition = services.reviews.record_review_disposition(
+                args.case_id,
+                args.review_id,
+                analyst_id=args.analyst,
+                analyst_role=args.role,
+                outcome=ReviewOutcome(args.outcome),
+                rationale_codes=args.code,
+                note=args.note,
+            )
+            print(
+                json.dumps(
+                    disposition.model_dump(mode="json"), indent=2
+                )
+            )
+        elif args.command == "open-due-reviews":
+            from datetime import date
+
+            as_of = (
+                date.fromisoformat(args.as_of)
+                if args.as_of
+                else date.today()
+            )
+            opened = services.reviews.open_due_reviews(
+                as_of=as_of, actor=args.actor
+            )
+            print(
+                json.dumps(
+                    [
+                        services.reviews.review_view(r) for r in opened
+                    ],
+                    indent=2,
                 )
             )
     except AmlError as exc:

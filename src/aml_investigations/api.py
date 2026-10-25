@@ -36,6 +36,7 @@ from .errors import (
     ApprovalRefusedError,
     CaseNotFoundError,
     CaseSealedError,
+    ContinuingReviewRefusedError,
     DispositionRefusedError,
     DispositionRequiredError,
     EvidenceChainError,
@@ -46,6 +47,7 @@ from .errors import (
     InvestigationStateError,
     NarrativeNotFoundError,
     NoTransactionsError,
+    ReviewNotFoundError,
     RulePackImmutableError,
     RulePackNotFoundError,
     SarNarrativeRefusedError,
@@ -72,6 +74,7 @@ from .models import (
     HitStatus,
     ListKind,
     ListSnapshot,
+    ReviewOutcome,
     RulePack,
     ScreeningSubject,
     Transaction,
@@ -235,6 +238,36 @@ class ClockRefreshRequest(BaseModel):
     as_of: date | None = None
 
 
+class ReviewOpenRequest(BaseModel):
+    """Open the current cycle's continuing-activity review (R9).
+    The actor is recorded on the review either way — a named
+    analyst, or the scheduler tick."""
+
+    actor: str = Field(default="continuing-review-service", min_length=1)
+
+
+class ReviewDispositionRequest(BaseModel):
+    """A named analyst's cycle decision (R9): file_continuing
+    routes the case to the narrative path through the disposition
+    gate (rationale codes from the escalate_sar vocabulary);
+    no_file_this_cycle is documented by codes from the review
+    vocabulary."""
+
+    analyst_id: str = Field(min_length=1)
+    analyst_role: str = Field(min_length=1)
+    outcome: ReviewOutcome
+    rationale_codes: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class ReviewTickRequest(BaseModel):
+    """The scheduler tick that opens due reviews (R9). ``as_of``
+    is the date cycles are judged due at; omitted means today."""
+
+    as_of: date | None = None
+    actor: str = Field(default="clock-service", min_length=1)
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"detail": message})
 
@@ -354,6 +387,16 @@ def create_app(services: Services | None = None) -> FastAPI:
     @app.exception_handler(SealingRefusedError)
     async def _sealing_refused(_request: Request, exc: SealingRefusedError):
         return _error(422, str(exc))
+
+    @app.exception_handler(ContinuingReviewRefusedError)
+    async def _review_refused(
+        _request: Request, exc: ContinuingReviewRefusedError
+    ):
+        return _error(422, str(exc))
+
+    @app.exception_handler(ReviewNotFoundError)
+    async def _review_not_found(_request: Request, exc: ReviewNotFoundError):
+        return _error(404, str(exc))
 
     @app.get("/health")
     async def health():
@@ -896,6 +939,96 @@ def create_app(services: Services | None = None) -> FastAPI:
             entry.model_dump(mode="json")
             for entry in services.clocks.escalation_queue(as_of=as_of)
         ]
+
+    @app.post(
+        "/cases/{case_id}/continuing-reviews", status_code=201
+    )
+    async def open_continuing_review(
+        case_id: str, payload: ReviewOpenRequest
+    ):
+        """Open the current cycle's continuing-activity review
+        (R9): the window's activity, assembled over the linked
+        case's current investigation record and verified at the
+        citation gate before it is stored."""
+        review = services.reviews.open_review(case_id, actor=payload.actor)
+        return {
+            "review": services.reviews.review_view(review),
+            "case_status": services.store.get_case(case_id).status.value,
+        }
+
+    @app.get("/cases/{case_id}/continuing-reviews")
+    async def list_continuing_reviews(case_id: str):
+        """The case's reviews: the current cycle's operative
+        review, the full per-cycle history, the recorded review
+        dispositions, and the cycle clocks they answer."""
+        case = services.store.get_case(case_id)
+        if case is None:
+            raise CaseNotFoundError(case_id)
+        clocks = services.clocks.case_clocks(case_id, as_of=date.today())
+        return {
+            "case_id": case_id,
+            "current": services.reviews.current_review(case_id),
+            "history": services.reviews.reviews_for_case(case_id),
+            "dispositions": [
+                d.model_dump(mode="json")
+                for d in services.store.list_review_dispositions(case_id)
+            ],
+            "continuing_cycles": [
+                c.model_dump(mode="json")
+                for c in clocks.continuing_history
+            ],
+        }
+
+    @app.get("/cases/{case_id}/continuing-reviews/{review_id}")
+    async def get_continuing_review(case_id: str, review_id: str):
+        return services.reviews.get_review_view(case_id, review_id)
+
+    @app.post(
+        "/cases/{case_id}/continuing-reviews/{review_id}/disposition",
+        status_code=201,
+    )
+    async def disposition_continuing_review(
+        case_id: str, review_id: str, payload: ReviewDispositionRequest
+    ):
+        """Record the cycle's decision — the only act that
+        answers the clock for the cycle. file_continuing mints an
+        escalate_sar disposition through the gate and routes the
+        case to sar_pending; no_file_this_cycle is documented by
+        its coded rationale and starts the next cycle."""
+        disposition = services.reviews.record_review_disposition(
+            case_id,
+            review_id,
+            analyst_id=payload.analyst_id,
+            analyst_role=payload.analyst_role,
+            outcome=payload.outcome,
+            rationale_codes=payload.rationale_codes,
+            note=payload.note,
+        )
+        return {
+            "disposition": disposition.model_dump(mode="json"),
+            "review": services.reviews.get_review_view(case_id, review_id),
+            "case_status": services.store.get_case(case_id).status.value,
+        }
+
+    @app.get("/customers/{customer_id}/continuing-reviews")
+    async def customer_continuing_reviews(customer_id: str):
+        """The customer's continuing-activity history: every
+        review and review disposition across their cases."""
+        return services.reviews.history_for_customer(customer_id)
+
+    @app.post("/continuing-reviews/open-due", status_code=201)
+    async def open_due_reviews(payload: ReviewTickRequest):
+        """The scheduler tick: open a review for every case whose
+        current cycle's review deadline has arrived and no review
+        stands for the cycle yet."""
+        opened = services.reviews.open_due_reviews(
+            as_of=payload.as_of or date.today(), actor=payload.actor
+        )
+        return {
+            "opened": [
+                services.reviews.review_view(r) for r in opened
+            ]
+        }
 
     @app.get("/queues/pending-confirmation")
     async def pending_confirmation_queue():
