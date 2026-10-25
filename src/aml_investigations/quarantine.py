@@ -100,6 +100,12 @@ SYSTEM_EVIDENCE_KINDS = frozenset(
         "clock_escalation",
         "continuing_review",
         "continuing_review_disposition",
+        # R12: adverse-media articles are scanned with field
+        # precision by the media service as they are ingested;
+        # media assessments are system-generated records. The
+        # funnel never double-records either.
+        "adverse_media",
+        "media_assessment",
         QUARANTINE_KIND,
         REVIEW_KIND,
     }
