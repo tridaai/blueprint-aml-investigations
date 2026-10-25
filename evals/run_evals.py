@@ -79,6 +79,11 @@ Zero-tolerance counters:
   - silent profile fallbacks accepted (R13) ....... must be 0
   - budget-breaching calls reaching transport (R13)  must be 0
   - ledger costs not matching tokens x price (R13)  must be 0
+  - console queue inputs disagreeing (R14) ........ must be 0
+  - console workspace artefact kinds missing (R14)  must be 0
+  - console-only write paths (R14) ................ must be 0
+  - unescaped render paths in the console (R14) ... must be 0
+  - console positive paths failing (R14) .......... must be 0
 
 Exit code 0 iff the gate passes.
 """
@@ -421,6 +426,14 @@ def main() -> int:
         "gateway_budget_breach_executed": 0,
         "gateway_ledger_cost_wrong": 0,
         "gateway_positive_paths_failed": 0,
+        # R14 analyst console counters
+        "console_pages_served": 0,
+        "console_cases_worked": 0,
+        "console_queue_mismatches": 0,
+        "console_workspace_gaps": 0,
+        "console_only_write_paths": 0,
+        "console_unescaped_render_paths": 0,
+        "console_positive_paths_failed": 0,
     }
 
     store = InMemoryCaseStore()
@@ -3700,7 +3713,270 @@ def main() -> int:
     except Exception:
         counters["gateway_positive_paths_failed"] += 1
 
-    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9+R10+R11+R12+R13 counters")
+    # ---------------------------------------------------------------
+    # Scenario 17 (R14): the analyst console. One static file,
+    # served by the app and fed entirely by the API: the page
+    # serves with the portfolio footer; a static scan proves the
+    # page holds no markup sink (data renders as text) and that
+    # every call it makes maps to a real route — no console-only
+    # write path; the queue's inputs agree with each other; and
+    # the workspace endpoints aggregate every artefact kind for a
+    # case worked end to end over HTTP on the production wiring
+    # and the reference feeds.
+    # ---------------------------------------------------------------
+    import os
+    import re as _re
+
+    _ctmp = Path(tempfile.mkdtemp(prefix="aml-evals-console-"))
+    os.environ["AML_SQLITE_PATH"] = str(_ctmp / "default-app.db")
+    os.environ["OBJECT_STORE_DIR"] = str(_ctmp / "default-objects")
+    from fastapi.testclient import TestClient as _TestClient
+
+    from aml_investigations.api import create_app as _create_app
+    from aml_investigations.config import Settings as _Settings
+    from aml_investigations.wiring import build_services as _build_services
+
+    _repo = Path(__file__).resolve().parents[1]
+    _csettings = _Settings(
+        database_url=None,
+        sqlite_path=_ctmp / "aml.db",
+        migrations_dir=_repo / "migrations",
+        object_store_dir=_ctmp / "objects",
+        s3_endpoint_url=None,
+        s3_bucket="aml-evidence",
+        seed_alerts_path=_repo / "data" / "seed_alerts.json",
+        screening_lists_path=_repo / "data" / "screening_lists.json",
+        transaction_streams_path=_repo / "data" / "transaction_streams.json",
+        typology_rules_path=_repo / "data" / "typology_rules.json",
+        adverse_media_path=_repo / "data" / "adverse_media.json",
+        model_profiles_path=_repo / "data" / "model_profiles.json",
+        model_prices_path=_repo / "data" / "model_prices.json",
+        model_profile="offline",
+        log_level="WARNING",
+    )
+    _capp = _create_app(_build_services(_csettings))
+    _client = _TestClient(_capp)
+
+    # The page itself: served, HTML, portfolio footer present.
+    _page = _client.get("/console")
+    if (
+        _page.status_code != 200
+        or "text/html" not in _page.headers.get("content-type", "")
+        or "Visit Trida AI →" not in _page.text
+        or "View all blueprints →" not in _page.text
+    ):
+        counters["console_positive_paths_failed"] += 1
+    else:
+        counters["console_pages_served"] += 1
+    _source = _page.text
+
+    # Static safety: no markup sink anywhere in the file, exactly
+    # one fetch site (the api helper), text rendering in use.
+    for _sink in (
+        "innerHTML",
+        "insertAdjacentHTML",
+        "document.write",
+        "outerHTML",
+    ):
+        if _sink in _source:
+            counters["console_unescaped_render_paths"] += 1
+    if _source.count("fetch(") != 1 or "textContent" not in _source:
+        counters["console_unescaped_render_paths"] += 1
+
+    # Surface scan: every api() call in the console must map to a
+    # route the app serves, with the same method. A non-GET call
+    # with no matching route would be a console-only write path.
+    _routes = set()
+    for _route in _capp.routes:
+        for _method in getattr(_route, "methods", set()) or set():
+            _routes.add(
+                (_method, _re.sub(r"\{[^}]+\}", "{}", _route.path))
+            )
+    _call_re = _re.compile(
+        r'api\(\s*"(GET|POST|PUT|DELETE)"\s*,\s*'
+        r'("[^"]*"(?:\s*\+\s*(?:"[^"]*"|[A-Za-z_$][\w.$]*))*)'
+    )
+    _calls = _call_re.findall(_source)
+    if not _calls:
+        counters["console_only_write_paths"] += 1
+    for _method, _expr in _calls:
+        _template = ""
+        for _part in _expr.split("+"):
+            _part = _part.strip()
+            if _part.startswith('"'):
+                _template += _part.strip('"')
+            else:
+                _template += "{}"
+        if (_method, _template) not in _routes:
+            if _method == "GET":
+                counters["console_workspace_gaps"] += 1
+            else:
+                counters["console_only_write_paths"] += 1
+
+    # The worked case, driven over the console's own routes.
+    _cid = None
+    try:
+        _client.post("/screening/snapshots/ingest-feed")
+        _client.post("/typologies/rule-packs/register-feed")
+        _opened = _client.post(
+            "/alerts/intake", json={"alert_id": "ALRT-2026-1001"}
+        )
+        _cid = _opened.json()["case_id"]
+        _client.post("/alerts/intake", json={"alert_id": "ALRT-2026-1002"})
+        _client.post(
+            f"/cases/{_cid}/transitions",
+            json={"target": "assembling", "actor": "eval"},
+        )
+        _client.post(f"/cases/{_cid}/transactions/ingest-feed")
+        _client.post(
+            f"/cases/{_cid}/screening",
+            json={
+                "pins": {"sanctions": "2026.10.1", "pep": "2026.10.1"},
+                "actor": "eval",
+            },
+        )
+        _client.post(
+            f"/cases/{_cid}/typologies/run",
+            json={
+                "pack_id": "harborline-typologies",
+                "version": "2026.10.1",
+                "actor": "eval",
+            },
+        )
+        _client.post(
+            f"/cases/{_cid}/transitions",
+            json={"target": "investigating", "actor": "eval"},
+        )
+        _record = _client.post(
+            f"/cases/{_cid}/investigation/run", json={"actor": "eval"}
+        ).json()
+        _client.post(
+            "/customers/CUST-1001/profile", json={"as_of": "2026-10-25"}
+        )
+        _client.post(
+            f"/cases/{_cid}/media/search", json={"as_of": "2026-10-25"}
+        )
+        _client.post(
+            f"/cases/{_cid}/transitions",
+            json={"target": "awaiting_analyst", "actor": "eval"},
+        )
+        _disp = _client.post(
+            f"/cases/{_cid}/disposition",
+            json={
+                "analyst_id": "a.okafor",
+                "analyst_role": "analyst",
+                "outcome": "escalate_sar",
+                "rationale_codes": ["STRUCTURING_SUSPECTED"],
+                "record_id": _record["record_id"],
+                "record_version": _record["version"],
+            },
+        )
+        _draft = _client.post(f"/cases/{_cid}/sar/draft", json={})
+        if (
+            _disp.status_code != 201
+            or _draft.status_code != 201
+            or not _draft.json()["verification"]["all_verified"]
+        ):
+            counters["console_positive_paths_failed"] += 1
+    except Exception:
+        counters["console_positive_paths_failed"] += 1
+        _cid = None
+
+    if _cid is not None:
+        # The queue's three inputs agree about the case set, and
+        # the worked case carries a filing deadline.
+        _cases = _client.get("/cases").json()
+        _board = _client.get("/clocks/board").json()
+        if {c["case_id"] for c in _cases} != {
+            v["case_id"] for v in _board
+        }:
+            counters["console_queue_mismatches"] += 1
+        _board_row = next(v for v in _board if v["case_id"] == _cid)
+        if not _board_row["filing"]["operative_deadline"]:
+            counters["console_queue_mismatches"] += 1
+
+        def _ws(path):
+            _r = _client.get(path)
+            return _r.json() if _r.status_code == 200 else None
+
+        _evidence = _ws(f"/cases/{_cid}/evidence")
+        _verify = _ws(f"/cases/{_cid}/evidence/verify")
+        _screening = _ws(f"/cases/{_cid}/screening")
+        _typo = _ws(f"/cases/{_cid}/typologies")
+        _inv = _ws(f"/cases/{_cid}/investigation")
+        _profile = _ws(f"/cases/{_cid}/profile")
+        _media = _ws(f"/cases/{_cid}/media/assessments")
+        _ledger = _ws(f"/cases/{_cid}/model-ledger")
+        _clock = _ws(f"/cases/{_cid}/clock")
+        _sar = _ws(f"/cases/{_cid}/sar")
+        _checks = [
+            bool(_evidence),
+            bool(_verify and _verify["chain_intact"]),
+            bool(
+                _screening
+                and _screening["screened_against"]
+                and _screening["hits"]
+            ),
+            bool(_typo and _typo["findings"]),
+            bool(
+                _inv
+                and _inv["current"]
+                and all(
+                    f["citations"] for f in _inv["current"]["findings"]
+                )
+            ),
+            bool(
+                _profile
+                and any(
+                    f["field"] == "name"
+                    for f in _profile["identity_facts"]
+                )
+            ),
+            bool(_media and _media["assessments"]),
+            bool(_ledger and _ledger["entries"]),
+            bool(_clock and _clock["filing"]["state"]),
+            bool(
+                _sar
+                and _sar["current"]
+                and _sar["current"]["status"] == "verified"
+            ),
+        ]
+        counters["console_workspace_gaps"] += _checks.count(False)
+        counters["console_cases_worked"] += 1
+
+        # The vocabulary the console's forms are built from.
+        _vocab = _client.get("/vocabulary").json()
+        if "STRUCTURING_SUSPECTED" not in _vocab["dispositions"][
+            "rationale_codes"
+        ]["escalate_sar"]:
+            counters["console_positive_paths_failed"] += 1
+
+        # A gate act through the console's routes: the
+        # dispositioner is refused, the second person approves.
+        _refused = _client.post(
+            f"/cases/{_cid}/sar/approve",
+            json={
+                "approver_id": "a.okafor",
+                "approver_role": "senior_analyst",
+                "outcome": "approved",
+            },
+        )
+        _approved = _client.post(
+            f"/cases/{_cid}/sar/approve",
+            json={
+                "approver_id": "m.osei",
+                "approver_role": "senior_analyst",
+                "outcome": "approved",
+            },
+        )
+        if (
+            _refused.status_code != 422
+            or _approved.status_code != 201
+            or _approved.json()["case_status"] != "filed_sar"
+        ):
+            counters["console_positive_paths_failed"] += 1
+
+    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9+R10+R11+R12+R13+R14 counters")
     for key, value in counters.items():
         print(f"  {key}: {value}")
     zero_tolerance = [
@@ -3788,6 +4064,11 @@ def main() -> int:
         "gateway_budget_breach_executed",
         "gateway_ledger_cost_wrong",
         "gateway_positive_paths_failed",
+        "console_queue_mismatches",
+        "console_workspace_gaps",
+        "console_only_write_paths",
+        "console_unescaped_render_paths",
+        "console_positive_paths_failed",
     ]
     passed = all(counters[k] == 0 for k in zero_tolerance) and counters["cases_opened"] == len(ALERTS)
     print("GATE: PASS" if passed else "GATE: FAIL")
