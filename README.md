@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R13 of 20)
+## What is built at this round (R14 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -347,9 +347,37 @@ docker compose up --build
   caller, never switched to silently. Rollups read per case
   (by purpose and by profile, with the budget position) and
   per day across the portfolio.
+- **Analyst console (R14).** The analyst's working surface is
+  one static HTML file served by the app at `/console` —
+  inline CSS and vanilla JS, no build step, no framework —
+  following the portfolio console standard (light theme, the
+  Trida footer). The queue joins the case list to the clock
+  board and the quarantine queue, so every row carries its
+  filing-clock state and deadline, its continuing-review due
+  state, and its quarantine badges, sortable by clock urgency.
+  The workspace renders the whole file in analyst order: the
+  alert, the regulatory clocks, the KYC profile with identity
+  conflicts standing as conflicts, the hash-chained evidence
+  with quarantined items fenced and badged, screening against
+  its pinned snapshots, transactions, typology findings, the
+  investigation record with its citations, media assessments,
+  and the case's priced model ledger. The action surfaces are
+  the human gates themselves — disposition, confirmation of an
+  adverse close, SAR approval or rejection, quarantine review,
+  continuing-review disposition — each a form built from the
+  coded vocabularies the API serves at `/vocabulary`, carried
+  under an analyst identity the console requires before it
+  will submit, and every gate refusal renders as the plain
+  error text the API returned. The console adds no write path
+  of its own (the eval gate scans every call it makes against
+  the app's route table), and it renders everything as text:
+  the file holds no markup sink, so a memo carrying a script
+  is displayed as the data it is, never executed.
 
-The rest — the analyst console — lands in R14 per the round
-map in `docs/architecture.md`.
+The rest — eval depth, the Postgres production profile,
+reporting, access control, the red team, and release
+hardening — lands in R15–R20 per the round map in
+`docs/architecture.md`.
 
 ## Configuration
 
@@ -377,7 +405,7 @@ map in `docs/architecture.md`.
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, KYC profiles, counterparties, adverse media, model gateway, API, SQL store
+make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, KYC profiles, counterparties, adverse media, model gateway, analyst console, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 
@@ -423,8 +451,11 @@ unquarantined (0), uncited media claims in a record (0), and
 media relevance bands wrong on the graded corpus (0), model
 calls without a priced ledger entry (0), silent profile
 fallbacks accepted (0), budget-breaching calls reaching the
-transport (0), and ledger costs not matching tokens × price
-(0).
+transport (0), ledger costs not matching tokens × price
+(0), console queue inputs disagreeing (0), console workspace
+artefact kinds missing (0), console-only write paths (0),
+unescaped render paths in the console (0), and console
+positive paths failing (0).
 
 ## Honest status
 
@@ -457,7 +488,9 @@ transport (0), and ledger costs not matching tokens × price
   named analyst's coded decision — and every piece of untrusted
   text on the file scanned at ingestion, with anything that reads
   as an instruction quarantined on the chain and fenced out of
-  every composer and verifier that touches it.
+  every composer and verifier that touches it — the whole file
+  readable in the analyst console (R14), which renders it as
+  text and acts on it only through the same gated routes.
 - The Docker image builds in CI-grade environments; the compose
   stack is the supported local full-stack path.
 

@@ -975,6 +975,79 @@ land afterwards. Zero-tolerance counters: unpriced calls,
 silent fallbacks accepted, budget breaches executed, and
 ledger costs wrong — all zero.
 
+## Analyst console (R14) — the human surface, no new authority
+
+Everything before this round is services and gates; R14 is the
+surface an analyst actually works on. It is deliberately the
+thinnest layer in the system: one static HTML file
+(`src/aml_investigations/static/console.html`, inline CSS and
+vanilla JS, no build step, no framework), served by the app at
+`GET /console`, following the portfolio console standard —
+light theme, indigo accent, the Trida footer. The console
+holds no state of its own beyond the analyst identity the
+operator types into the header, and it reaches the system
+only through the routes the API already serves.
+
+The queue is a join, computed in the browser from three reads
+(`GET /cases`, `GET /clocks/board`, `GET /queues/quarantine`):
+each row carries the case's status, its filing-clock state and
+operative deadline, its continuing-review state when one
+runs, and its count of unreviewed quarantine records, and the
+list sorts by clock urgency (the worse of the filing and
+continuing clocks decides), by detection date, or by severity,
+with status filters over the same data. The workspace is the
+case file in analyst order — alert, clocks, KYC profile,
+evidence chain, screening, transactions, typology findings,
+investigation record, dispositions, SAR narrative, continuing
+reviews, media assessments, model ledger — one read per panel
+from the endpoints each earlier round built, including the
+chain-verification read, so what the analyst sees is the
+system's own account of the file, not a reporting copy.
+
+Three disciplines keep the console honest:
+
+- **Rendering is text-only.** Every value the API returns is
+  placed into the page as text (text-node assignment through
+  one set of DOM builders); the file contains no markup sink
+  at all. Evidence content is untrusted by Law 7, and the
+  console treats it that way: a transaction memo carrying a
+  script displays as the characters it is. Quarantined items
+  are badged on the chain, and their matched spans render
+  inside a fence block carrying the same marker the composers
+  fence with — `[quarantined instruction text removed]` — with
+  the pattern, family, field, and excerpt visible as data.
+- **Forms are built from the served vocabularies.**
+  `GET /vocabulary` serves the gates' own coded sets — the
+  disposition rationale per outcome and the missing-evidence
+  types (R5), the confirmation outcomes, the SAR rejection
+  codes (R7), and the continuing-review no-file codes with
+  their descriptions (R9) — so a console form can only offer
+  codes the corresponding gate will accept, and the gate still
+  re-checks every one server-side.
+- **Actions are the gates, unchanged.** The console's only
+  writes are the human acts the rounds before it built: a
+  disposition, a confirmation, a SAR approval or rejection, a
+  quarantine review, opening a continuing review, and a
+  review disposition. Each is submitted under the header
+  identity (name + coded role); without one the form will not
+  submit, and the API refuses anonymous and system actors on
+  its own side regardless. A refusal comes back as the API's
+  error text and is rendered as-is — the console never retries
+  around a refusal, offers a weaker path, or hides one.
+
+Graded by eval Scenario 17 over the production wiring and the
+reference feeds: the page serves with its footer markers; the
+queue's inputs agree on the case set; a case worked end to
+end over HTTP aggregates every artefact kind in the workspace;
+a surface scan reconstructs every call the console makes and
+checks it against the app's route table (28 call sites at
+this round, six of them writes — every one an existing gated
+route); and a static scan finds no markup sink and exactly
+one fetch site, the console's own API helper. Zero-tolerance
+counters: queue mismatches, workspace gaps, console-only
+write paths, unescaped render paths, and console positive
+paths failed — all zero.
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
