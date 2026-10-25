@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R11 of 20)
+## What is built at this round (R12 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -298,10 +298,30 @@ docker compose up --build
   signal, not an anecdote. Counterparty names are rendered
   through R10's quarantine fencing; the stored values are
   never touched by a fence.
+- **Adverse media (R12).** A recall-oriented source port (in
+  production, a licensed news database; here, a labelled
+  reference corpus) returns candidate articles for a case's
+  subject, and every article enters the case only as an
+  evidence item that passes the quarantine scanner like any
+  other untrusted text — an instruction planted in an article
+  body quarantines and fences exactly as one in a memo does.
+  Relevance is scored in code, never by a model: name-match
+  strength from the screening matcher, disambiguation signals
+  read against the assembled customer profile (identifier,
+  date of birth, stated age, geography, occupation,
+  associated entities — each recorded with its contribution),
+  and adverse categories from a versioned keyword taxonomy
+  with the matched terms named. A name match contradicted by
+  the profile's date of birth lands in the `namesake_cleared`
+  band with the contradiction stated — screening's namesake
+  discipline, carried into media. Assessments are
+  append-only, pin the scorer and taxonomy versions and the
+  profile version used, and surface in the investigation
+  record as cited findings with their band stated; media
+  never dispositions a case and never moves its state.
 
-The rest of the investigation — adverse media, the analyst
-console — lands in rounds R12–R14 per the round map in
-`docs/architecture.md`.
+The rest — the model gateway, the analyst console — lands in
+rounds R13–R14 per the round map in `docs/architecture.md`.
 
 ## Configuration
 
@@ -315,13 +335,14 @@ console — lands in rounds R12–R14 per the round map in
 | `SEED_ALERTS_PATH` | `./data/seed_alerts.json` | Reference alert feed |
 | `TRANSACTION_STREAMS_PATH` | `./data/transaction_streams.json` | Reference transaction feed (full-history streams) |
 | `TYPOLOGY_RULES_PATH` | `./data/typology_rules.json` | Reference typology rule-pack feed |
+| `ADVERSE_MEDIA_PATH` | `./data/adverse_media.json` | Reference adverse-media corpus (stand-in for a licensed news database) |
 | `MIGRATIONS_DIR` | `./migrations` | Numbered SQL migrations |
 | `LOG_LEVEL` | `INFO` | Log level |
 
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, KYC profiles, counterparties, API, SQL store
+make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, KYC profiles, counterparties, adverse media, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 
@@ -360,13 +381,20 @@ payloads reaching a record unfenced (0), injected imperatives
 followed in a SAR narrative (0), payloads without a quarantine
 event (0), quarantined spans grounding a figure (0), injected
 instructions changing case state (0), quarantine false positives
-on ordinary banking prose (0), and reviews un-fencing
-quarantined content (0).
+on ordinary banking prose (0), reviews un-fencing quarantined
+content (0), namesakes graded strong in media screening (0),
+media changing a case's state (0), article instructions left
+unquarantined (0), uncited media claims in a record (0), and
+media relevance bands wrong on the graded corpus (0).
 
 ## Honest status
 
 - Screening lists are stand-ins — real OFAC/PEP/adverse-media feeds
   are licensed integrations, wired behind the screening port in R2.
+- Adverse media runs on a reference corpus behind the port. The
+  scoring, the quarantine discipline, and the findings path are
+  real; a production deployment wires a licensed news database
+  to the port, and no shipped article is real reporting.
 - The monitoring system is a port with a reference feed; no real
   core/monitoring vendor is connected.
 - Investigation narrative (R4) and SAR narrative drafting (R6) run

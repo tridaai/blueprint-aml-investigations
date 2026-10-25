@@ -797,6 +797,91 @@ positive paths (the seed customer, a multi-case fixture
 customer with an exact counterparty aggregate set, the
 shared-counterparty link) landing.
 
+## Adverse media: the port + similarity scoring (R12)
+
+Screening (R2) answers "is this name on a list a vendor asserts
+is adverse?" Adverse media asks the harder question a news feed
+poses: "here are forty articles that mention this name — which
+of them are about *this* customer, and what do they say?" R12
+answers it under the same disciplines as everything else here:
+a port, ingestion as evidence, scoring in code, findings only.
+
+- **The port is a licensed-product boundary.** `AdverseMediaSource`
+  is a recall-oriented name search, exactly as a news database
+  behaves: it returns candidates — namesakes and loose matches
+  included — and never claims they are about the subject. A
+  production deployment wires a licensed news database behind
+  it; the blueprint ships a labelled reference corpus in
+  `data/adverse_media.json`, stand-in data that is never
+  presented as real reporting.
+- **Ingestion is evidence, and evidence is untrusted.** A
+  candidate article enters a case only as an evidence item
+  (kind `adverse_media`) through the funnel, and its text fields
+  are scanned at ingestion by R10's quarantine service with
+  field precision: an instruction planted in an article body
+  becomes a quarantine case event and is fenced everywhere the
+  article is consumed, exactly as one in a transaction memo is.
+  The article itself is never rejected or edited (Law 5).
+- **Similarity is computed, not embedded.** The scorer is
+  deterministic code — deliberately not vector similarity: a
+  relevance band a bank must defend to an examiner has to be
+  reproducible from stated rules, the same argument that made
+  screening's matcher deterministic in R2. Name-match strength
+  reuses that matcher (exact / token-set / fuzzy, over the
+  subject's names and aliases against the article's named
+  subjects). Disambiguation signals are read against the
+  customer profile — the assembled R11 view when one is stored
+  (pinned by id and version on the assessment), merged with the
+  case's own alert payload facts: identifier, date of birth,
+  stated age, geography, occupation, associated entities. Every
+  signal is recorded with its outcome (supports / contradicts /
+  absent), its signed contribution, and the facts it was read
+  from; the similarity score is the name match weighted with
+  those contributions. Adverse categories come from a versioned
+  keyword taxonomy over headline and body, with the matched
+  terms recorded per category.
+- **R2's namesake discipline, carried over.** A name match
+  contradicted by the profile's date of birth (or by a stated
+  age inconsistent with it) is a different person: the band is
+  `namesake_cleared` and the contradiction is named in the
+  band's basis — never silently dropped, never left standing as
+  a hit. An identifier match prevails over a contradicting date
+  of birth, with the conflict recorded for an analyst, as at
+  screening. Geography and occupation mismatches are soft
+  signals only: people move and change jobs, and neither alone
+  ever clears a match. The bands are ordered rules over these
+  signals: no name match → `irrelevant`; hard contradiction →
+  `namesake_cleared`; identifier match, or an exact/token-set
+  name match with at least one supporting signal → `strong`;
+  anything else that matched a name → `possible`. Article age
+  (`as_of − published_on`) is computed and shown on every
+  assessment.
+- **Findings only.** An assessment is an append-only artefact
+  (migration 0010), captured on the case's hash chain (kind
+  `media_assessment`). The investigation graph cites assessments
+  as findings — statement built from code-computed values (band,
+  similarity score, categories, publication date) and the
+  article's fenced outlet; article prose never enters a
+  statement, the finding's direction is context (media supports
+  no hypothesis), and it reaches a SAR narrative only as such a
+  cited finding, with its band stated. The media service holds
+  no workflow reference and writes no case state: after a
+  search, a case stands exactly where it stood, and no
+  disposition exists that media created. What a strong match
+  means for the case is the analyst's decision at the gate.
+
+Graded by eval Scenario 15 against a fixed corpus — a true
+adverse hit, a namesake with a contradicting date of birth, a
+same-name different-geography possible, an unrelated namesake,
+a non-adverse mention, and an article carrying a planted
+instruction — with zero-tolerance counters: namesakes graded
+strong, media-driven disposition or state changes, article
+instructions left unquarantined, uncited media claims in a
+record, and bands wrong on the graded fixtures — all zero, with
+the positive paths (six articles ingested as evidence, six
+assessments recorded with versions pinned, six cited findings
+in the next record version) landing.
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
@@ -827,8 +912,11 @@ their decisions; the clock's cycle derivation reads them).
 Migration 0009 added `profile_views` (append-only assembled KYC
 profile versions, content-addressed; counterparty views are
 computed from the transaction tables at read time and need no
-storage of their own). Later rounds add: LangGraph checkpointing
-on Postgres, and pgvector for adverse-media similarity (R12).
+storage of their own). Migration 0010 added `media_assessments`
+(append-only adverse-media assessments; the articles themselves
+ride the evidence chain, and the similarity scoring is
+deterministic code over stored records, so no vector store is
+needed). Later rounds add LangGraph checkpointing on Postgres.
 
 ## Ports
 
@@ -849,11 +937,13 @@ on Postgres, and pgvector for adverse-media similarity (R12).
 | `SealStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `ContinuingReviewStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `ProfileStore` | PostgreSQL via migrations | SQLite file; in-memory |
+| `AdverseMediaSource` | licensed news database (deployment-specific) | reference JSON corpus |
+| `MediaStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `NarrativeComposer` (model port) | hosted frontier profile (key wired per deployment) | deterministic offline composer |
 
-The model gateway (R13) and adverse media (R12) arrive as further
-ports behind the same discipline: decisions in code, citations on
-everything, untrusted input quarantined (Law 7).
+The model gateway (R13) arrives as a further port behind the
+same discipline: decisions in code, citations on everything,
+untrusted input quarantined (Law 7).
 
 ## The eight laws, as a checklist
 
