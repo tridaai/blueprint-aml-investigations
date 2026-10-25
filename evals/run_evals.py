@@ -65,6 +65,11 @@ Zero-tolerance counters:
   - injected instructions changing case state (R10) must be 0
   - quarantine false positives on clean prose (R10) must be 0
   - reviews un-fencing quarantined content (R10).. must be 0
+  - identity conflicts merged silently (R11) ...... must be 0
+  - profile figures wrong vs hand totals (R11) .... must be 0
+  - counterparty links missed or extra (R11) ...... must be 0
+  - stale fact classes left unnamed (R11) ......... must be 0
+  - profile facts from an unstated source (R11) .... must be 0
 
 Exit code 0 iff the gate passes.
 """
@@ -133,6 +138,7 @@ from aml_investigations.models import (  # noqa: E402
     Transaction,
 )
 from aml_investigations.object_store import LocalObjectStore  # noqa: E402
+from aml_investigations.profiles import ProfileService  # noqa: E402
 from aml_investigations.quarantine import (  # noqa: E402
     FENCE_MARKER,
     QuarantineService,
@@ -365,6 +371,14 @@ def main() -> int:
         "quarantine_false_positives": 0,
         "review_unfenced_content": 0,
         "injection_positive_paths_failed": 0,
+        # R11 profile counters
+        "profile_views_assembled": 0,
+        "profile_identity_conflict_merged": 0,
+        "profile_figure_wrong": 0,
+        "counterparty_link_errors": 0,
+        "profile_stale_class_unnamed": 0,
+        "profile_unstated_source": 0,
+        "profile_positive_paths_failed": 0,
     }
 
     store = InMemoryCaseStore()
@@ -2722,7 +2736,291 @@ def main() -> int:
         if scan_text(prose):
             counters["quarantine_false_positives"] += 1
 
-    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9+R10 counters")
+    # ------------------------------------------------------------------
+    # Scenario 14 (R11): KYC profile assembly + counterparty views.
+    # A fixture customer with two cases whose alert payloads
+    # disagree on the date of birth — both values must stand,
+    # flagged as a conflict — and a second customer sharing one
+    # counterparty. Aggregates are graded against hand-computed
+    # totals; freshness against the policy's named stale classes.
+    # ------------------------------------------------------------------
+    p_store = InMemoryCaseStore()
+    p_evidence = EvidenceService(
+        p_store,
+        LocalObjectStore(
+            Path(tempfile.mkdtemp(prefix="aml-evals-profiles-"))
+        ),
+        seal_store=p_store,
+    )
+    p_quarantine = QuarantineService(
+        p_store, p_evidence, seal_store=p_store
+    )
+    p_evidence.quarantine = p_quarantine
+    p_workflow = CaseWorkflow(p_store, screening_store=p_store)
+    p_screening = ScreeningService(
+        p_store, p_store, p_evidence, seal_store=p_store,
+        quarantine=p_quarantine,
+    )
+    p_typologies = TypologyService(
+        p_store, p_store, p_evidence, seal_store=p_store,
+        quarantine=p_quarantine,
+    )
+    p_dispositions = DispositionService(
+        p_store, p_store, p_store, p_store, p_evidence, p_workflow,
+        seal_store=p_store,
+    )
+    p_profiles = ProfileService(
+        p_store, p_store, p_store, p_store, p_evidence,
+        dispositions=p_dispositions, approval_store=p_store,
+        quarantine=p_quarantine,
+    )
+    p_screening.ingest_snapshot(
+        _snapshot(
+            ListKind.SANCTIONS,
+            "2026.10.1",
+            "2026-10-01T00:00:00Z",
+            [
+                # Namesake: the customer's name, another DOB.
+                ListEntry(
+                    entry_id="SDN-P1", name="Priya Nair",
+                    dob="1988-01-01",
+                ),
+                ListEntry(entry_id="SDN-P2", name="Kestrel Trading LLC"),
+            ],
+        ),
+        actor="eval-feed",
+    )
+
+    def p_alert(alert_id, customer, account, detected, raw):
+        return Alert(
+            alert_id=alert_id,
+            rule_id="TM-VELOCITY-03",
+            customer_id=customer,
+            account_id=account,
+            severity="high",
+            detected_on=detected,
+            summary="Profile eval case.",
+            raw=raw,
+        )
+
+    def p_txn(tid, account, day, amount, direction="credit", cp=None):
+        return Transaction(
+            transaction_id=tid,
+            account_id=account,
+            posted_at=datetime.combine(
+                day, time(10, 0), tzinfo=timezone.utc
+            ),
+            direction=direction,
+            amount=Decimal(amount),
+            channel="wire",
+            counterparty=cp,
+        )
+
+    P_PROFILES = [
+        AccountProfile(
+            account_id="ACCT-P1", customer_id="CUST-P1",
+            opened_on=date(2024, 1, 15),
+            account_type="business_checking",
+            expected_monthly_amount=Decimal("20000"),
+            expected_monthly_count=25,
+        ),
+        AccountProfile(
+            account_id="ACCT-P2", customer_id="CUST-P1",
+            opened_on=date(2025, 6, 1),
+            account_type="personal_checking",
+        ),
+        AccountProfile(
+            account_id="ACCT-P3", customer_id="CUST-P2",
+            opened_on=date(2023, 3, 1),
+            account_type="business_checking",
+        ),
+    ]
+    P_STREAMS = {
+        "ACCT-P1": [
+            p_txn("TX-P1", "ACCT-P1", date(2026, 2, 10), "4000.00",
+                  cp="Kestrel Trading LLC"),
+            p_txn("TX-P2", "ACCT-P1", date(2026, 2, 20), "4000.00",
+                  cp="Kestrel Trading LLC"),
+            p_txn("TX-P3", "ACCT-P1", date(2026, 3, 1), "4000.00",
+                  cp="Kestrel Trading LLC"),
+            p_txn("TX-P4", "ACCT-P1", date(2026, 3, 2), "1500.00",
+                  direction="debit", cp="Kestrel Trading LLC"),
+            p_txn("TX-P5", "ACCT-P1", date(2026, 3, 3), "2500.50",
+                  cp="Orbital Freight Inc"),
+        ],
+        "ACCT-P2": [
+            p_txn("TX-P6", "ACCT-P2", date(2026, 3, 4), "700.25",
+                  direction="debit", cp="Kestrel Trading LLC"),
+            p_txn("TX-P7", "ACCT-P2", date(2026, 3, 5), "100.00",
+                  cp="Solo Vendor"),
+        ],
+        "ACCT-P3": [
+            p_txn("TX-P8", "ACCT-P3", date(2026, 3, 6), "900.00",
+                  cp="Kestrel Trading LLC"),
+        ],
+    }
+    P_ALERTS = [
+        p_alert(
+            "EVAL-P-1", "CUST-P1", "ACCT-P1", "2026-03-01",
+            {
+                "customer_name": "Priya Nair",
+                "customer_dob": "1990-05-14",
+                "customer_identifiers": ["PP-IN-7781"],
+                "counterparties": [{"name": "Kestrel Trading LLC"}],
+            },
+        ),
+        p_alert(
+            "EVAL-P-2", "CUST-P1", "ACCT-P2", "2026-03-02",
+            {
+                "customer_name": "Priya Nair",
+                # A different DOB on record. Both stand.
+                "customer_dob": "1990-05-15",
+                "customer_identifiers": ["PP-IN-7781"],
+                "counterparties": [{"name": "Kestrel Trading LLC"}],
+            },
+        ),
+        p_alert(
+            "EVAL-P-3", "CUST-P2", "ACCT-P3", "2026-03-03",
+            {
+                "customer_name": "Owen Doyle",
+                "counterparties": [{"name": "Kestrel Trading LLC"}],
+            },
+        ),
+    ]
+    for p_a in P_ALERTS:
+        p_intake = IntakeService(
+            p_store, ListAlertFeed([p_a]), p_evidence,
+            quarantine=p_quarantine,
+        )
+        p_case = p_intake.open_case(p_a.alert_id)
+        p_workflow.transition(
+            p_case.case_id, CaseStatus.ASSEMBLING, actor="eval"
+        )
+        p_screening.screen_case(
+            p_case.case_id, {ListKind.SANCTIONS: "2026.10.1"},
+            actor="eval",
+        )
+        p_typologies.ingest_from_source(
+            p_case.case_id,
+            ListTransactionFeed(P_PROFILES, P_STREAMS),
+            actor="eval-feed",
+        )
+
+    # The seed customer on the main stack assembles too.
+    main_profiles = ProfileService(store, store, store, store, evidence)
+    try:
+        seed_view = main_profiles.assemble_profile(
+            "CUST-1001", as_of=date(2026, 10, 25), actor="eval"
+        )
+        counters["profile_views_assembled"] += 1
+        if not seed_view.case_history or not seed_view.source_case_ids:
+            counters["profile_positive_paths_failed"] += 1
+    except Exception:
+        counters["profile_positive_paths_failed"] += 1
+
+    try:
+        view = p_profiles.assemble_profile(
+            "CUST-P1", as_of=date(2026, 3, 20), actor="eval"
+        )
+        counters["profile_views_assembled"] += 1
+    except Exception:
+        counters["profile_positive_paths_failed"] += 1
+        view = None
+    if view is not None:
+        # The DOB conflict stands, both values, flagged — never
+        # merged, never resolved by picking a winner.
+        dob_conflicts = [
+            c for c in view.identity_conflicts if c.field == "dob"
+        ]
+        if (
+            len(dob_conflicts) != 1
+            or dob_conflicts[0].values != ["1990-05-14", "1990-05-15"]
+            or dob_conflicts[0].flag != "identity_conflict"
+        ):
+            counters["profile_identity_conflict_merged"] += 1
+        if {c.field for c in view.identity_conflicts} != {"dob"}:
+            counters["profile_identity_conflict_merged"] += 1
+        # Every fact names the stored artefact it came from.
+        for fact in view.identity_facts:
+            if (
+                fact.source_kind not in {"alert_payload", "screening"}
+                or not fact.source_ref
+                or fact.source_case_id not in view.source_case_ids
+            ):
+                counters["profile_unstated_source"] += 1
+        # Freshness at the near date: nothing stale.
+        if any(f.stale for f in view.freshness):
+            counters["profile_stale_class_unnamed"] += 1
+        # Rebuild over the same inputs returns the stored view.
+        rebuilt = p_profiles.assemble_profile(
+            "CUST-P1", as_of=date(2026, 3, 20), actor="eval"
+        )
+        if (
+            rebuilt.profile_id != view.profile_id
+            or len(p_profiles.view_history("CUST-P1")) != 1
+        ):
+            counters["profile_positive_paths_failed"] += 1
+        # Freshness at the far date: the policy's stale classes
+        # are exactly the ones named stale.
+        later = p_profiles.assemble_profile(
+            "CUST-P1", as_of=date(2027, 6, 1), actor="eval"
+        )
+        stale = {f.fact_class for f in later.freshness if f.stale}
+        if stale != {"account", "screening", "activity"}:
+            counters["profile_stale_class_unnamed"] += 1
+
+    # Counterparty aggregates against hand-computed totals:
+    # Kestrel for CUST-P1 = in 3x4000.00, out 1500.00 + 700.25.
+    try:
+        cp_views = {
+            v.name_raw: v
+            for v in p_profiles.counterparties_for_customer("CUST-P1")
+        }
+        expected = {
+            "Kestrel Trading LLC": (
+                Decimal("12000.00"), Decimal("2200.25"), 5
+            ),
+            "Orbital Freight Inc": (
+                Decimal("2500.50"), Decimal("0"), 1
+            ),
+            "Solo Vendor": (Decimal("100.00"), Decimal("0"), 1),
+        }
+        if set(cp_views) != set(expected):
+            counters["profile_figure_wrong"] += 1
+        for name, (exp_in, exp_out, exp_count) in expected.items():
+            got = cp_views.get(name)
+            if got is None or (
+                got.total_in,
+                got.total_out,
+                got.transaction_count,
+            ) != (exp_in, exp_out, exp_count):
+                counters["profile_figure_wrong"] += 1
+        kestrel = cp_views.get("Kestrel Trading LLC")
+        if kestrel is not None:
+            if kestrel.customer_ids != ["CUST-P1", "CUST-P2"]:
+                counters["counterparty_link_errors"] += 1
+            if len(kestrel.screening) != 3 or any(
+                s.status is not HitStatus.OPEN for s in kestrel.screening
+            ):
+                counters["counterparty_link_errors"] += 1
+        for name in ("Orbital Freight Inc", "Solo Vendor"):
+            other = cp_views.get(name)
+            if other is not None and other.customer_ids != ["CUST-P1"]:
+                counters["counterparty_link_errors"] += 1
+        shared = p_profiles.shared_counterparties()
+        if (
+            len(shared) != 1
+            or shared[0].name_raw != "Kestrel Trading LLC"
+            or shared[0].customer_ids != ["CUST-P1", "CUST-P2"]
+            or shared[0].total_in != Decimal("12900.00")
+            or shared[0].total_out != Decimal("2200.25")
+            or shared[0].transaction_count != 6
+        ):
+            counters["counterparty_link_errors"] += 1
+    except Exception:
+        counters["profile_positive_paths_failed"] += 1
+
+    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9+R10+R11 counters")
     for key, value in counters.items():
         print(f"  {key}: {value}")
     zero_tolerance = [
@@ -2793,6 +3091,12 @@ def main() -> int:
         "quarantine_false_positives",
         "review_unfenced_content",
         "injection_positive_paths_failed",
+        "profile_identity_conflict_merged",
+        "profile_figure_wrong",
+        "counterparty_link_errors",
+        "profile_stale_class_unnamed",
+        "profile_unstated_source",
+        "profile_positive_paths_failed",
     ]
     passed = all(counters[k] == 0 for k in zero_tolerance) and counters["cases_opened"] == len(ALERTS)
     print("GATE: PASS" if passed else "GATE: FAIL")

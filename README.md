@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R10 of 20)
+## What is built at this round (R11 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -269,10 +269,39 @@ docker compose up --build
   quarantine queue — an audit act recorded on the chain that
   never un-fences anything; the fences derive from the
   append-only record itself and are permanent.
+- **KYC profile assembly + counterparty views (R11)** — the
+  analyst no longer re-gathers what the bank already knows. A
+  **profile view** is assembled in code from stored artefacts
+  only — alert payloads on case chains, screening runs and
+  hits, account profiles, transaction records, dispositions,
+  approvals; nothing in it is hand-entered. Identity facts each
+  carry the artefact they were read from, and **conflicts are
+  shown, never merged**: two dates of birth on record both
+  stand, flagged `identity_conflict`, with no winner picked.
+  The view also carries the customer's accounts, their full
+  case history with disposition standing and SAR outcomes,
+  their screening history per list and version — including
+  namesake clearances with the reason they were cleared — and
+  **KYC freshness**: when each fact class was last
+  corroborated, with stale classes named against a versioned
+  freshness policy. The view is a derived artefact:
+  content-addressed, append-only versions, rebuilding over
+  unchanged inputs returns the stored view. The R4
+  investigation consumes the assembled view for its profile
+  facts when one exists, capturing it on the case's chain so
+  the record's profile citations resolve to it. **Counterparty
+  views** aggregate the customer's stored transactions in code
+  (Decimal totals in and out, counts, first/last seen, the
+  name's screening state across the store) and compute the
+  **shared-counterparty links** exactly — a counterparty
+  standing on more than one customer's cases is a network
+  signal, not an anecdote. Counterparty names are rendered
+  through R10's quarantine fencing; the stored values are
+  never touched by a fence.
 
-The rest of the investigation — KYC profile assembly, the
-analyst console — lands in rounds R11–R14 per the round map
-in `docs/architecture.md`.
+The rest of the investigation — adverse media, the analyst
+console — lands in rounds R12–R14 per the round map in
+`docs/architecture.md`.
 
 ## Configuration
 
@@ -292,7 +321,7 @@ in `docs/architecture.md`.
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, API, SQL store
+make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, KYC profiles, counterparties, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 

@@ -725,6 +725,78 @@ points — scan, fence, ground.
   reviews un-fencing content — all zero, with the clean and
   dirty positive paths landing.
 
+## KYC profile assembly + counterparty views (R11)
+
+Everything before this round works one case at a time. An
+analyst, though, works on a customer: what the bank already
+knows about them, across every case, is the context every
+decision is made in. R11 assembles that context as a derived
+artefact — the **profile view** — under three disciplines.
+
+- **Stored artefacts only, every fact sourced.** The view is
+  assembled in code from what the earlier rounds stored: alert
+  payloads on case chains (identity facts), screening runs and
+  hits (corroboration, hits and clearances), account profiles,
+  transaction records, disposition records (standing, via the
+  R5 service's own derivation) and approvals (SAR outcomes).
+  Nothing is hand-entered; each identity fact carries its
+  source kind, the case it came from, a human-readable source
+  reference, and the evidence item it was read from. A customer
+  with no cases has no profile — assembly refuses rather than
+  fabricate an empty one.
+- **Conflicts are shown, never merged.** `name` and `dob` are
+  single-valued identity attributes: two distinct values on
+  record produce an `identity_conflict` entry carrying both
+  values and every fact behind them, and neither value is
+  promoted. Identifiers are multi-valued (a passport and a
+  licence are both facts), so they stand side by side without a
+  conflict flag. Screening history is carried per list kind and
+  snapshot version with hits and clearances alike — a namesake
+  cleared by the deterministic matcher stands with its
+  `date_of_birth_mismatch` reason visible, not dropped.
+- **Derived, content-addressed, append-only.** The content hash
+  covers the derived facts (including the freshness verdicts,
+  which are computed at an `as_of` passed in — no wall-clock
+  reads inside the derivation, the clocks' rule). Rebuilding
+  over unchanged inputs returns the stored view; changed
+  inputs append the next version and earlier versions stand.
+  Freshness is judged per fact class (identity, account,
+  screening, activity) against a versioned policy recorded on
+  the view; a class never corroborated is named stale, not
+  silently absent.
+
+The investigation graph consumes the view: when a stored view
+exists for a case's customer, assembly captures it on the
+case's chain as a `customer_profile_view` evidence item
+(reused while unchanged, like the account-profile capture),
+and the record's profile finding cites it alongside the raw
+account profile — so the record's profile facts trace to the
+assembled, provenance-carrying view as well. With no view
+stored, nothing changes (R4's behaviour is untouched).
+
+**Counterparty views** aggregate the stored transactions in
+code: per counterparty, Decimal totals in and out (Law 4 — the
+model computes no money), transaction count, first/last seen,
+the currencies and accounts touched, and the name's screening
+state across every case in the store (each hit naming its
+case, list and status). Grouping is by normalised name over
+verbatim stored values. **Shared counterparties** — names
+standing on more than one customer's cases — are computed
+exactly and served as their own view: the network signal an
+analyst needs, derived, not anecdotal. Display names pass
+through R10's quarantine fencing (a counterparty name carrying
+an instruction renders with the fence marker in the composed
+view); the stored transaction keeps the name verbatim.
+
+Graded by eval Scenario 14 with zero-tolerance counters:
+identity conflicts merged silently, profile figures wrong
+against hand-computed Decimal totals, counterparty links
+missed or extra, stale fact classes left unnamed, and profile
+facts built from an unstated source — all zero, with the
+positive paths (the seed customer, a multi-case fixture
+customer with an exact counterparty aggregate set, the
+shared-counterparty link) landing.
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
@@ -751,9 +823,12 @@ views over the case, disposition, and evidence records (see the
 clocks section above), and their escalation events ride the
 evidence chain. Migration 0008 added `continuing_reviews` and
 `continuing_review_dispositions` (append-only review artefacts and
-their decisions; the clock's cycle derivation reads them). Later
-rounds add: LangGraph checkpointing on Postgres, and pgvector for
-adverse-media similarity (R12).
+their decisions; the clock's cycle derivation reads them).
+Migration 0009 added `profile_views` (append-only assembled KYC
+profile versions, content-addressed; counterparty views are
+computed from the transaction tables at read time and need no
+storage of their own). Later rounds add: LangGraph checkpointing
+on Postgres, and pgvector for adverse-media similarity (R12).
 
 ## Ports
 
@@ -773,6 +848,7 @@ adverse-media similarity (R12).
 | `ApprovalStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `SealStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `ContinuingReviewStore` | PostgreSQL via migrations | SQLite file; in-memory |
+| `ProfileStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `NarrativeComposer` (model port) | hosted frontier profile (key wired per deployment) | deterministic offline composer |
 
 The model gateway (R13) and adverse media (R12) arrive as further
