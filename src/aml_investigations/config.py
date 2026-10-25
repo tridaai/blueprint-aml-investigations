@@ -24,6 +24,8 @@ class Settings:
     s3_bucket: str
     seed_alerts_path: Path
     screening_lists_path: Path
+    transaction_streams_path: Path
+    typology_rules_path: Path
     log_level: str
 
     @property
@@ -70,6 +72,16 @@ def load_settings() -> Settings:
             os.environ.get("SCREENING_LISTS_PATH"),
             Path("./data/screening_lists.json"),
             repo_root / "data" / "screening_lists.json",
+        ),
+        transaction_streams_path=_resolve(
+            os.environ.get("TRANSACTION_STREAMS_PATH"),
+            Path("./data/transaction_streams.json"),
+            repo_root / "data" / "transaction_streams.json",
+        ),
+        typology_rules_path=_resolve(
+            os.environ.get("TYPOLOGY_RULES_PATH"),
+            Path("./data/typology_rules.json"),
+            repo_root / "data" / "typology_rules.json",
         ),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
     )

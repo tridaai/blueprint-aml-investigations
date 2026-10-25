@@ -18,13 +18,19 @@ from pathlib import Path
 
 from .migrations import run_migrations
 from .models import (
+    AccountProfile,
     AuditEvent,
     Case,
     EvidenceItem,
     ListKind,
     ListSnapshot,
+    RulePack,
     ScreeningHit,
     ScreeningRun,
+    Transaction,
+    TransactionBatch,
+    TypologyFinding,
+    TypologyRun,
 )
 
 
@@ -36,6 +42,12 @@ class InMemoryCaseStore:
         self._snapshots: dict[tuple[str, str], ListSnapshot] = {}
         self._runs: list[ScreeningRun] = []
         self._hits: dict[str, ScreeningHit] = {}
+        self._packs: dict[tuple[str, str], RulePack] = {}
+        self._profiles: dict[str, AccountProfile] = {}
+        self._batches: dict[str, TransactionBatch] = {}
+        self._transactions: dict[str, list[Transaction]] = {}
+        self._typology_runs: list[TypologyRun] = []
+        self._findings: dict[str, TypologyFinding] = {}
         self._lock = threading.Lock()
 
     def ping(self) -> bool:
@@ -145,6 +157,110 @@ class InMemoryCaseStore:
                 raise KeyError(hit.hit_id)
             self._hits[hit.hit_id] = hit.model_copy(deep=True)
         return hit
+
+    # --- typologies (Law 4): packs, profiles, transactions, findings --
+    def save_rule_pack(self, pack: RulePack) -> RulePack:
+        with self._lock:
+            key = (pack.pack_id, pack.version)
+            if key in self._packs:
+                raise KeyError(f"rule pack already exists: {key}")
+            self._packs[key] = pack.model_copy(deep=True)
+        return pack
+
+    def get_rule_pack(self, pack_id: str, version: str) -> RulePack | None:
+        pack = self._packs.get((pack_id, version))
+        return pack.model_copy(deep=True) if pack else None
+
+    def list_rule_packs(self) -> list[RulePack]:
+        return [p.model_copy(deep=True) for p in self._packs.values()]
+
+    def save_account_profile(self, profile: AccountProfile) -> AccountProfile:
+        with self._lock:
+            self._profiles[profile.account_id] = profile.model_copy(deep=True)
+        return profile
+
+    def get_account_profile(self, account_id: str) -> AccountProfile | None:
+        profile = self._profiles.get(account_id)
+        return profile.model_copy(deep=True) if profile else None
+
+    def add_transaction_batch(self, batch: TransactionBatch) -> TransactionBatch:
+        with self._lock:
+            self._batches[batch.batch_id] = batch.model_copy(deep=True)
+        return batch
+
+    def get_transaction_batch(
+        self, case_id: str, content_sha256: str
+    ) -> TransactionBatch | None:
+        for batch in self._batches.values():
+            if batch.case_id == case_id and batch.content_sha256 == content_sha256:
+                return batch.model_copy(deep=True)
+        return None
+
+    def list_transaction_batches(self, case_id: str) -> list[TransactionBatch]:
+        return [
+            b.model_copy(deep=True)
+            for b in self._batches.values()
+            if b.case_id == case_id
+        ]
+
+    def add_transactions(
+        self, case_id: str, batch_id: str, transactions: list[Transaction]
+    ) -> None:
+        with self._lock:
+            existing = {t.transaction_id for t in self._transactions.get(case_id, [])}
+            for txn in transactions:
+                if txn.transaction_id in existing:
+                    raise KeyError(
+                        f"transaction already stored for case {case_id}: "
+                        f"{txn.transaction_id}"
+                    )
+                existing.add(txn.transaction_id)
+            self._transactions.setdefault(case_id, []).extend(
+                t.model_copy(deep=True) for t in transactions
+            )
+
+    def list_transactions(self, case_id: str) -> list[Transaction]:
+        txns = self._transactions.get(case_id, [])
+        ordered = sorted(txns, key=lambda t: (t.posted_at, t.transaction_id))
+        return [t.model_copy(deep=True) for t in ordered]
+
+    def add_typology_run(self, run: TypologyRun) -> TypologyRun:
+        with self._lock:
+            self._typology_runs.append(run.model_copy(deep=True))
+        return run
+
+    def list_typology_runs(self, case_id: str) -> list[TypologyRun]:
+        return [
+            r.model_copy(deep=True)
+            for r in self._typology_runs
+            if r.case_id == case_id
+        ]
+
+    def get_typology_run_by_fingerprint(
+        self, case_id: str, pack_id: str, version: str, fingerprint: str
+    ) -> TypologyRun | None:
+        for run in self._typology_runs:
+            if (
+                run.case_id == case_id
+                and run.rule_pack_id == pack_id
+                and run.rule_pack_version == version
+                and run.input_fingerprint == fingerprint
+            ):
+                return run.model_copy(deep=True)
+        return None
+
+    def add_finding(self, finding: TypologyFinding) -> TypologyFinding:
+        with self._lock:
+            self._findings[finding.finding_id] = finding.model_copy(deep=True)
+        return finding
+
+    def list_findings(self, case_id: str) -> list[TypologyFinding]:
+        # Insertion order; the service presents findings in engine order.
+        return [
+            f.model_copy(deep=True)
+            for f in self._findings.values()
+            if f.case_id == case_id
+        ]
 
 
 class SqlCaseStore:
@@ -389,3 +505,169 @@ class SqlCaseStore:
         )
         self._commit()
         return hit
+
+    # --- typologies (Law 4): packs, profiles, transactions, findings --
+    def save_rule_pack(self, pack: RulePack) -> RulePack:
+        self._execute(
+            "INSERT INTO rule_packs (pack_id, version, content_hash, payload)"
+            " VALUES (?, ?, ?, ?)",
+            (pack.pack_id, pack.version, pack.content_hash, pack.model_dump_json()),
+        )
+        self._commit()
+        return pack
+
+    def get_rule_pack(self, pack_id: str, version: str) -> RulePack | None:
+        row = self._fetchone(
+            "SELECT payload FROM rule_packs WHERE pack_id = ? AND version = ?",
+            (pack_id, version),
+        )
+        return RulePack.model_validate_json(row["payload"]) if row else None
+
+    def list_rule_packs(self) -> list[RulePack]:
+        rows = self._fetchall(
+            "SELECT payload FROM rule_packs ORDER BY pack_id, version"
+        )
+        return [RulePack.model_validate_json(r["payload"]) for r in rows]
+
+    def save_account_profile(self, profile: AccountProfile) -> AccountProfile:
+        existing = self.get_account_profile(profile.account_id)
+        if existing is None:
+            self._execute(
+                "INSERT INTO account_profiles (account_id, customer_id, payload)"
+                " VALUES (?, ?, ?)",
+                (profile.account_id, profile.customer_id, profile.model_dump_json()),
+            )
+        else:
+            self._execute(
+                "UPDATE account_profiles SET payload = ? WHERE account_id = ?",
+                (profile.model_dump_json(), profile.account_id),
+            )
+        self._commit()
+        return profile
+
+    def get_account_profile(self, account_id: str) -> AccountProfile | None:
+        row = self._fetchone(
+            "SELECT payload FROM account_profiles WHERE account_id = ?",
+            (account_id,),
+        )
+        return AccountProfile.model_validate_json(row["payload"]) if row else None
+
+    def add_transaction_batch(self, batch: TransactionBatch) -> TransactionBatch:
+        self._execute(
+            "INSERT INTO transaction_batches (batch_id, case_id, account_id,"
+            " content_sha256, evidence_seq, payload) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                batch.batch_id,
+                batch.case_id,
+                batch.account_id,
+                batch.content_sha256,
+                batch.evidence_seq,
+                batch.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return batch
+
+    def get_transaction_batch(
+        self, case_id: str, content_sha256: str
+    ) -> TransactionBatch | None:
+        row = self._fetchone(
+            "SELECT payload FROM transaction_batches WHERE case_id = ?"
+            " AND content_sha256 = ?",
+            (case_id, content_sha256),
+        )
+        return TransactionBatch.model_validate_json(row["payload"]) if row else None
+
+    def list_transaction_batches(self, case_id: str) -> list[TransactionBatch]:
+        rows = self._fetchall(
+            "SELECT payload FROM transaction_batches WHERE case_id = ?"
+            " ORDER BY batch_id",
+            (case_id,),
+        )
+        return [TransactionBatch.model_validate_json(r["payload"]) for r in rows]
+
+    def add_transactions(
+        self, case_id: str, batch_id: str, transactions: list[Transaction]
+    ) -> None:
+        for txn in transactions:
+            self._execute(
+                "INSERT INTO transactions (transaction_id, case_id, batch_id,"
+                " account_id, posted_at, payload) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    txn.transaction_id,
+                    case_id,
+                    batch_id,
+                    txn.account_id,
+                    txn.posted_at.isoformat(),
+                    txn.model_dump_json(),
+                ),
+            )
+        self._commit()
+
+    def list_transactions(self, case_id: str) -> list[Transaction]:
+        rows = self._fetchall(
+            "SELECT payload FROM transactions WHERE case_id = ?"
+            " ORDER BY posted_at, transaction_id",
+            (case_id,),
+        )
+        return [Transaction.model_validate_json(r["payload"]) for r in rows]
+
+    def add_typology_run(self, run: TypologyRun) -> TypologyRun:
+        self._execute(
+            "INSERT INTO typology_runs (run_id, case_id, rule_pack_id,"
+            " rule_pack_version, input_fingerprint, run_at, payload)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                run.run_id,
+                run.case_id,
+                run.rule_pack_id,
+                run.rule_pack_version,
+                run.input_fingerprint,
+                run.run_at.isoformat(),
+                run.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return run
+
+    def list_typology_runs(self, case_id: str) -> list[TypologyRun]:
+        rows = self._fetchall(
+            "SELECT payload FROM typology_runs WHERE case_id = ?"
+            " ORDER BY run_at ASC, run_id ASC",
+            (case_id,),
+        )
+        return [TypologyRun.model_validate_json(r["payload"]) for r in rows]
+
+    def get_typology_run_by_fingerprint(
+        self, case_id: str, pack_id: str, version: str, fingerprint: str
+    ) -> TypologyRun | None:
+        row = self._fetchone(
+            "SELECT payload FROM typology_runs WHERE case_id = ?"
+            " AND rule_pack_id = ? AND rule_pack_version = ?"
+            " AND input_fingerprint = ?",
+            (case_id, pack_id, version, fingerprint),
+        )
+        return TypologyRun.model_validate_json(row["payload"]) if row else None
+
+    def add_finding(self, finding: TypologyFinding) -> TypologyFinding:
+        self._execute(
+            "INSERT INTO typology_findings (finding_id, case_id, run_id,"
+            " typology_id, payload) VALUES (?, ?, ?, ?, ?)",
+            (
+                finding.finding_id,
+                finding.case_id,
+                finding.run_id,
+                finding.typology_id,
+                finding.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return finding
+
+    def list_findings(self, case_id: str) -> list[TypologyFinding]:
+        rows = self._fetchall(
+            "SELECT payload FROM typology_findings WHERE case_id = ?"
+            " ORDER BY finding_id",
+            (case_id,),
+        )
+        return [TypologyFinding.model_validate_json(r["payload"]) for r in rows]

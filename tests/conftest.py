@@ -13,6 +13,8 @@ from aml_investigations.models import Alert
 from aml_investigations.object_store import LocalObjectStore
 from aml_investigations.screening import ListScreeningFeed, ScreeningService
 from aml_investigations.stores import InMemoryCaseStore
+from aml_investigations.transactions import ListRulePackFeed, ListTransactionFeed
+from aml_investigations.typologies import TypologyService
 from aml_investigations.wiring import Services
 from aml_investigations.workflow import CaseWorkflow
 
@@ -48,6 +50,7 @@ def services(tmp_path: Path) -> Services:
     feed = ListAlertFeed(list(SEED_ALERTS))
     intake = IntakeService(store, feed, evidence)
     screening = ScreeningService(store, store, evidence)
+    typologies = TypologyService(store, store, evidence)
     settings = Settings(
         database_url=None,
         sqlite_path=tmp_path / "aml.db",
@@ -57,6 +60,8 @@ def services(tmp_path: Path) -> Services:
         s3_bucket="aml-evidence",
         seed_alerts_path=tmp_path / "seed.json",
         screening_lists_path=tmp_path / "lists.json",
+        transaction_streams_path=tmp_path / "streams.json",
+        typology_rules_path=tmp_path / "rules.json",
         log_level="INFO",
     )
     return Services(
@@ -69,4 +74,7 @@ def services(tmp_path: Path) -> Services:
         intake=intake,
         screening=screening,
         screening_feed=ListScreeningFeed([]),
+        transactions=ListTransactionFeed([], {}),
+        typologies=typologies,
+        rule_pack_feed=ListRulePackFeed([]),
     )

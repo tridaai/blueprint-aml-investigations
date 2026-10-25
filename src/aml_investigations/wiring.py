@@ -16,9 +16,18 @@ from .config import Settings, load_settings
 from .evidence import EvidenceService
 from .intake import IntakeService, ReferenceAlertFeed
 from .object_store import LocalObjectStore, S3ObjectStore
-from .ports import AlertSource, CaseStore, ObjectStore, ScreeningListSource
+from .ports import (
+    AlertSource,
+    CaseStore,
+    ObjectStore,
+    RulePackSource,
+    ScreeningListSource,
+    TransactionSource,
+)
 from .screening import ReferenceScreeningFeed, ScreeningService
 from .stores import SqlCaseStore
+from .transactions import ReferenceRulePackFeed, ReferenceTransactionFeed
+from .typologies import TypologyService
 from .workflow import CaseWorkflow
 
 
@@ -33,6 +42,9 @@ class Services:
     intake: IntakeService
     screening: ScreeningService
     screening_feed: ScreeningListSource
+    transactions: TransactionSource
+    typologies: TypologyService
+    rule_pack_feed: RulePackSource
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -55,6 +67,9 @@ def build_services(settings: Settings | None = None) -> Services:
     intake = IntakeService(store, alerts, evidence)
     screening = ScreeningService(store, store, evidence)
     screening_feed = ReferenceScreeningFeed(settings.screening_lists_path)
+    transactions = ReferenceTransactionFeed(settings.transaction_streams_path)
+    typologies = TypologyService(store, store, evidence)
+    rule_pack_feed = ReferenceRulePackFeed(settings.typology_rules_path)
     return Services(
         settings=settings,
         store=store,
@@ -65,4 +80,7 @@ def build_services(settings: Settings | None = None) -> Services:
         intake=intake,
         screening=screening,
         screening_feed=screening_feed,
+        transactions=transactions,
+        typologies=typologies,
+        rule_pack_feed=rule_pack_feed,
     )
