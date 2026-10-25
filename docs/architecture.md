@@ -43,7 +43,10 @@ States: `opened`, `assembling`, `investigating`, `awaiting_analyst`,
 | opened | assembling |
 | assembling | investigating |
 | investigating | awaiting_analyst, escalated |
-| awaiting_analyst | investigating (send-back), escalated, closed, filed_sar |
+| awaiting_analyst | investigating (send-back), escalated, pending_confirmation, sar_pending, monitoring, closed, filed_sar |
+| pending_confirmation | closed (confirmed), investigating (declined), escalated |
+| sar_pending | investigating, escalated |
+| monitoring | investigating (review re-opens) |
 | escalated | investigating, awaiting_analyst |
 | closed, filed_sar | — (terminal) |
 
@@ -296,6 +299,63 @@ stable finding keys that name the pattern rather than a run's
 random ids, plus whether the hypothesis moved) is computed and
 stored on the new record.
 
+## Disposition gate (R5) — Law 1, with depth
+
+The analyst gate is a service (`dispositions.py`) standing between
+the investigation record and every state the record can lead to. A
+disposition is an append-only artefact — `DispositionRecord` —
+never a form field on the case:
+
+- **Identity, mechanically.** Analyst id + coded role
+  (`analyst | senior_analyst | l2_reviewer`) are required. Blank,
+  anonymous, and service/system actors are refused with the named
+  reason `anonymous_or_system_actor` before anything else is
+  examined — the system routes work to the gate; it never decides
+  at it.
+- **Five coded outcomes.** `close_no_action`, `close_monitor`
+  (with a mandatory 1..365-day review period and a computed
+  review-due date), `escalate_sar` (routes to `sar_pending`, the
+  R6 entry point — nothing is filed), `escalate_l2`, and
+  `request_more_evidence` (which must name the missing evidence
+  types in the R4 open-question vocabulary).
+- **Coded rationale from a versioned vocabulary.** Each outcome
+  has its own reason-code set (`RATIONALE_CODES`, vocabulary
+  `2026.10.1`, recorded on every disposition). At least one code
+  is mandatory; the free-text note supplements, never substitutes.
+- **The record citation.** A disposition names the investigation
+  record id *and version* it relied on, and the gate refuses
+  anything but the case's current record
+  (`record_citation_not_current`), just as it refuses a case with
+  no record at all. When a later record version supersedes the
+  cited one, the investigation graph's persist step flags the
+  case `DISPOSITION_STALE`; a fresh disposition on the current
+  record clears it. A disposition's derived standing — effective,
+  pending_confirmation, confirmed, declined, superseded — is
+  computed from the append-only history, never stored as an edit.
+- **The sanctions posture binds.** The gate uses the same
+  unresolved-sanctions-hits definition as the workflow's close
+  guard (one helper in `workflow.py`): `close_no_action` and
+  `close_monitor` over an unresolved hit are refused at the gate,
+  before the close guard would have to fire.
+- **Dual control on adverse closures.** A `close_no_action` whose
+  record's hypothesis is adverse (any label but
+  `no_adverse_pattern`) records the disposition but parks the case
+  in `pending_confirmation`; the closure takes effect only when an
+  `l2_reviewer` — never the dispositioning analyst
+  (`self_confirmation` is refused) — confirms. A decline returns
+  the case to `investigating`, with the declined disposition kept
+  in history. Confirmations are their own append-only records.
+
+Every disposition and confirmation is also captured as a
+hash-chained evidence item (`disposition`,
+`disposition_confirmation`), and every refusal is written to the
+audit log as `disposition_refused` with its named reason before it
+is raised. The gate drives state exclusively through the case
+workflow, so the transition table above stays the single source of
+which moves exist. The work queues an analyst actually lives in —
+cases awaiting confirmation, cases escalated or SAR-pending — are
+read models over the same records (`GET /queues/...`).
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
@@ -309,7 +369,9 @@ tables (`list_snapshots`, `screening_runs`, `screening_hits`);
 migration 0003 added the typology tables (`rule_packs`,
 `account_profiles`, `transaction_batches`, `transactions`,
 `typology_runs`, `typology_findings`); migration 0004 added
-`investigation_records` (append-only record versions).
+`investigation_records` (append-only record versions); migration
+0005 added `dispositions` and `disposition_confirmations`
+(append-only gate records).
 Later rounds add: LangGraph checkpointing on Postgres, pgvector for
 adverse-media similarity (R12), and the clock/scheduler tables (R8).
 
@@ -326,6 +388,7 @@ adverse-media similarity (R12), and the clock/scheduler tables (R8).
 | `RulePackSource` | governed rule-pack distribution | reference JSON feed |
 | `TypologyStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `InvestigationStore` | PostgreSQL via migrations | SQLite file; in-memory |
+| `DispositionStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `NarrativeComposer` (model port) | hosted frontier profile (key wired per deployment) | deterministic offline composer |
 
 The model gateway (R13) and adverse media (R12) arrive as further
@@ -335,7 +398,10 @@ everything, untrusted input quarantined (Law 7).
 ## The eight laws, as a checklist
 
 1. No case closes without a named analyst's disposition — state
-   machine + disposition guard (R1) ✓
+   machine + disposition guard (R1) ✓; the gate itself (R5):
+   coded outcomes and rationale, record-version citation with
+   staleness flagging, sanctions posture, dual control on adverse
+   closures ✓
 2. SAR drafting is dual-control; narrative statements must resolve to
    citations, verified in code — R6/R7.
 3. Screening is version-pinned; new list versions trigger delta

@@ -60,12 +60,14 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R4 of 20)
+## What is built at this round (R5 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
-  filed_sar / escalated`, with the lawful transition table enforced
-  by the compiled graph; refused transitions are audited.
+  filed_sar / escalated`, joined at the gate (R5) by
+  `pending_confirmation`, `sar_pending`, and `monitoring`, with the
+  lawful transition table enforced by the compiled graph; refused
+  transitions are audited.
 - **Alert intake port** with a reference feed; intake is idempotent
   per alert, stamps the initial-detection date (the anchor for every
   regulatory clock), and captures the verbatim alert payload as the
@@ -122,10 +124,32 @@ docker compose up --build
   refuses loudly until a key is wired. Records are hash-chained
   evidence, versioned: new evidence produces the next version with
   a computed diff, the superseded version stays on the chain.
+- **Disposition gate (R5)** — the analyst's decision is an
+  append-only artefact, not a form field: a named analyst id and a
+  coded role (anonymous and system actors are refused mechanically),
+  one of five coded outcomes (close, close-under-monitoring with a
+  review period, escalate to SAR drafting, escalate to the second
+  line, or send back for named missing evidence), and coded
+  rationale from a versioned vocabulary — free text may supplement
+  the codes, never replace them. The disposition must cite the
+  investigation-record version it relied on, and only the current
+  record may be cited; when a newer record supersedes the cited one
+  the case is flagged `DISPOSITION_STALE` until a fresh disposition
+  answers it. An unresolved sanctions hit blocks both closing
+  outcomes at the gate, on the same definition the state machine's
+  close guard uses. And an adverse closure is dual-control: closing
+  a case whose hypothesis is adverse parks it in
+  `pending_confirmation` until a second-line reviewer — never the
+  dispositioning analyst — confirms; a decline sends the case back
+  to investigation with the refusal kept in history. Dispositions
+  and confirmations sit on the evidence hash chain like everything
+  else, and the confirmation and escalation work queues are read
+  straight from the gate's records.
 
-The rest of the investigation — the disposition gate, SAR narrative
-+ citation verification, dual-control approval, regulatory clocks —
-lands in rounds R5–R9 per the round map in `docs/architecture.md`.
+The rest of the investigation — SAR narrative + citation
+verification, dual-control narrative approval and sealing,
+regulatory clocks — lands in rounds R6–R9 per the round map in
+`docs/architecture.md`.
 
 ## Configuration
 
@@ -145,7 +169,7 @@ lands in rounds R5–R9 per the round map in `docs/architecture.md`.
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, API, SQL store
+make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 
@@ -159,7 +183,13 @@ runs not idempotent (0), findings without their rule version (0),
 investigation citations failing to resolve (0), unresolvable
 findings accepted at record time (0), investigation hypotheses
 wrong or incomplete (0), statement figures not tracing to citations
-(0), investigation re-runs duplicating records (0).
+(0), investigation re-runs duplicating records (0), anonymous or
+system dispositions accepted (0), dispositions without an
+investigation record accepted (0), sanctions-blocked closures
+accepted (0), self-confirmations accepted (0), free-text-only
+rationale accepted (0), stale dispositions left unflagged (0),
+superseded-record citations accepted (0), disposition positive
+paths failed (0).
 
 ## Honest status
 
