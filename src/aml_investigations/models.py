@@ -1243,6 +1243,223 @@ class LegalHoldEvent(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Regulatory clocks (R8): Law 6 — deadlines computed in code
+# ---------------------------------------------------------------------------
+
+
+class ClockState(str, enum.Enum):
+    """A regulatory clock's state, derived — never stored as text.
+
+    A live clock moves ``on_track`` -> ``due_soon`` -> ``due`` ->
+    ``overdue`` by pure date arithmetic against its operative
+    deadline. A clock ends ``satisfied`` (the case reached
+    ``filed_sar``) or ``closed_no_file`` (a documented no-file
+    decision at the analyst gate). ``not_applicable`` is the
+    vocabulary's remainder — a clock kind that does not apply to
+    the case at hand.
+    """
+
+    ON_TRACK = "on_track"
+    DUE_SOON = "due_soon"
+    DUE = "due"
+    OVERDUE = "overdue"
+    SATISFIED = "satisfied"
+    CLOSED_NO_FILE = "closed_no_file"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class FilingClock(BaseModel):
+    """One case's SAR filing clock, computed in code (Law 6).
+
+    The deadlines are pure date arithmetic over the case's
+    initial-detection date: the SAR initial deadline is detection
+    + 30 calendar days; where the record identifies no subject,
+    FinCEN's outer limit — detection + 60 days — is the operative
+    deadline instead. ``subject_identified`` is itself derived
+    from the record (the alert payload's subject facts, or a
+    corroborated screening hit), never an analyst's say-so: the
+    extension to the outer deadline is a coded state, not a
+    favour someone grants a case.
+
+    ``state`` and ``days_remaining`` are computed against the
+    ``as_of`` the caller names — the clock computation reads no
+    wall clock, so a board rendered for a date is reproducible
+    for that date. When the clock has ended (``satisfied`` /
+    ``closed_no_file``) ``days_remaining`` is None and, for a
+    no-file ending, the closing disposition is named with its
+    coded rationale: that rationale *is* the no-file
+    documentation (Law 6).
+    """
+
+    case_id: str
+    customer_id: str
+    detected_on: date
+    subject_identified: bool
+    subject_basis: str = Field(
+        description="alert_payload | screening_hit | none — where "
+        "the identification (or its absence) was read from."
+    )
+    initial_deadline: date
+    outer_deadline: date
+    operative_deadline: date
+    operative_deadline_kind: str = Field(
+        description="initial | outer — which deadline governs."
+    )
+    state: ClockState
+    days_remaining: int | None = Field(
+        default=None,
+        description="operative_deadline - as_of, signed. Negative "
+        "is days overdue. None once the clock has ended.",
+    )
+    as_of: date
+    no_file_disposition_id: str | None = Field(
+        default=None,
+        description="closed_no_file only: the disposition record "
+        "whose coded rationale documents the no-file decision.",
+    )
+    no_file_rationale_codes: list[str] = Field(default_factory=list)
+    no_file_decided_on: date | None = None
+    monitor_review_due_on: date | None = Field(
+        default=None,
+        description="When the no-file decision was close_monitor: "
+        "the date its enhanced-monitoring review falls due.",
+    )
+
+
+class ContinuingActivityLink(BaseModel):
+    """The trigger record of a continuing-activity clock (R8).
+
+    Written onto the *new* case's evidence chain (kind
+    ``continuing_activity_link``) at intake, when a new alert
+    opens for a customer with a prior ``filed_sar`` case: the
+    link names the prior case and the filing determination date
+    every continuing deadline is computed from. The full review
+    workflow over this clock is R9; R8 starts the clock and
+    escalates it.
+    """
+
+    prior_case_id: str
+    customer_id: str
+    determination_on: date = Field(
+        description="The date the prior case's filing "
+        "determination was made (its approval / closing "
+        "disposition date)."
+    )
+    review_due_on: date = Field(
+        description="determination_on + 90 days (FinCEN "
+        "continuing-activity review)."
+    )
+    filing_due_on: date = Field(
+        description="determination_on + 120 days (the continuing "
+        "filing deadline)."
+    )
+    new_case_detected_on: date
+
+
+class ContinuingActivityClock(BaseModel):
+    """One case's continuing-activity clock, computed in code.
+
+    Started by a :class:`ContinuingActivityLink` on the case.
+    Until the review deadline the operative deadline is the
+    90-day review; once that date passes unmet, the operative
+    deadline becomes the 120-day filing deadline and
+    ``review_overdue`` says the review date went by. The clock
+    ends with the case: ``satisfied`` at ``filed_sar``,
+    ``closed_no_file`` at a documented no-file decision.
+    """
+
+    case_id: str
+    prior_case_id: str
+    customer_id: str
+    determination_on: date
+    review_due_on: date
+    filing_due_on: date
+    review_overdue: bool = False
+    operative_deadline: date
+    operative_deadline_kind: str = Field(
+        description="continuing_review | continuing_filing"
+    )
+    state: ClockState
+    days_remaining: int | None = None
+    as_of: date
+    link_evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the continuing_activity_link evidence "
+        "item that started this clock.",
+    )
+
+
+class ClockEscalationEvent(BaseModel):
+    """One recorded crossing of a clock into due / overdue (R8).
+
+    Escalation is a case event, not a sort order: the first time
+    a refresh finds a clock at ``due`` or ``overdue`` for a given
+    deadline, the crossing is written onto the case's evidence
+    chain (kind ``clock_escalation``) with the deadline it names.
+    Idempotent by construction — the recorded events are read
+    back before any new one is written, so re-computation never
+    duplicates a crossing.
+    """
+
+    event_id: str = Field(default_factory=lambda: _new_id("cesc"))
+    case_id: str
+    clock_kind: str = Field(description="filing | continuing_activity")
+    deadline_kind: str = Field(
+        description="initial | outer | continuing_review | "
+        "continuing_filing — the deadline that was crossed."
+    )
+    deadline: date
+    state: str = Field(description="due | overdue — the state at the crossing.")
+    as_of: date
+    days_overdue: int = Field(
+        default=0, description="Days past the deadline at the crossing."
+    )
+    recorded_at: datetime = Field(default_factory=_utcnow)
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the clock_escalation evidence item.",
+    )
+
+
+class CaseClocks(BaseModel):
+    """A case's full clock picture at an ``as_of``: its filing
+    clock, its continuing-activity clock when one was started,
+    the escalation events recorded on it, and any clock
+    violations the derivation found (a terminal case with no
+    disposition on record is a violation here, never a silence).
+    """
+
+    case_id: str
+    customer_id: str
+    status: CaseStatus
+    as_of: date
+    filing: FilingClock
+    continuing_activity: ContinuingActivityClock | None = None
+    escalations: list[ClockEscalationEvent] = Field(default_factory=list)
+    violations: list[str] = Field(default_factory=list)
+
+
+class EscalationQueueEntry(BaseModel):
+    """One entry of the clock escalation queue: a clock standing
+    at due_soon, due, or overdue, with the deadline it answers to
+    named in words. Satisfied and closed clocks never appear."""
+
+    case_id: str
+    customer_id: str
+    clock_kind: str = Field(description="filing | continuing_activity")
+    deadline_kind: str
+    deadline: date
+    state: ClockState
+    days_remaining: int = Field(
+        description="Signed: negative is days overdue."
+    )
+    reason: str = Field(
+        description="The named deadline and the time to it, in "
+        "words — the reason this entry stands in the queue."
+    )
+
+
 class ExportVerification(BaseModel):
     """The offline verdict on one exported case-file package (R7).
 
