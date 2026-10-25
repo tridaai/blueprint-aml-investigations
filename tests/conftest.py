@@ -9,6 +9,7 @@ import pytest
 from aml_investigations.config import Settings
 from aml_investigations.evidence import EvidenceService
 from aml_investigations.intake import IntakeService, ListAlertFeed
+from aml_investigations.investigation import InvestigationService
 from aml_investigations.models import Alert
 from aml_investigations.object_store import LocalObjectStore
 from aml_investigations.screening import ListScreeningFeed, ScreeningService
@@ -51,6 +52,7 @@ def services(tmp_path: Path) -> Services:
     intake = IntakeService(store, feed, evidence)
     screening = ScreeningService(store, store, evidence)
     typologies = TypologyService(store, store, evidence)
+    investigations = InvestigationService(store, store, store, store, evidence)
     settings = Settings(
         database_url=None,
         sqlite_path=tmp_path / "aml.db",
@@ -77,4 +79,5 @@ def services(tmp_path: Path) -> Services:
         transactions=ListTransactionFeed([], {}),
         typologies=typologies,
         rule_pack_feed=ListRulePackFeed([]),
+        investigations=investigations,
     )
