@@ -34,6 +34,11 @@ Zero-tolerance counters:
   - free-text-only rationale accepted (R5) ......... must be 0
   - stale dispositions left unflagged (R5) ......... must be 0
   - superseded-record citations accepted (R5) ...... must be 0
+  - SAR drafts for non-sar_pending cases (R6) ...... must be 0
+  - unverifiable statements marked verified (R6).. must be 0
+  - figures outside the cited records accepted (R6)  must be 0
+  - open questions hidden by a narrative (R6) ..... must be 0
+  - stale narratives still standing verified (R6). must be 0
 
 Exit code 0 iff the gate passes.
 """
@@ -59,6 +64,7 @@ from aml_investigations.errors import (  # noqa: E402
     InvestigationRefusedError,
     NoTransactionsError,
     RulePackImmutableError,
+    SarNarrativeRefusedError,
     ScreeningPinRequiredError,
 )
 from aml_investigations.evidence import EvidenceService  # noqa: E402
@@ -86,6 +92,7 @@ from aml_investigations.models import (  # noqa: E402
     Transaction,
 )
 from aml_investigations.object_store import LocalObjectStore  # noqa: E402
+from aml_investigations.sar import SarNarrativeService  # noqa: E402
 from aml_investigations.screening import (  # noqa: E402
     ReferenceScreeningFeed,
     ScreeningService,
@@ -254,6 +261,15 @@ def main() -> int:
         "disposition_stale_unflagged": 0,
         "disposition_stale_citation_accepted": 0,
         "disposition_positive_paths_failed": 0,
+        # R6 SAR narrative counters
+        "sar_narratives_drafted": 0,
+        "sar_narratives_verified": 0,
+        "sar_draft_non_sar_pending_accepted": 0,
+        "sar_unverifiable_marked_verified": 0,
+        "sar_figure_not_in_records_accepted": 0,
+        "sar_open_questions_omitted": 0,
+        "sar_stale_still_verified": 0,
+        "sar_positive_paths_failed": 0,
     }
 
     store = InMemoryCaseStore()
@@ -1188,7 +1204,162 @@ def main() -> int:
     except Exception:
         counters["chains_failed"] += 1
 
-    print("Blueprint #15 evals — R1+R2+R3+R4+R5 counters")
+    # -- Scenario 9 (R6): SAR narrative drafting + the citation verifier.
+    # The shipped seed structuring case, routed by the gate to
+    # sar_pending, drafts a narrative that the citation verifier
+    # passes statement by statement. The verifier's refusals are
+    # probed with tampered drafts: a figure altered by a cent, a
+    # statement stripped of its citations, a narrative that hides
+    # the record's open questions — none may verify. And when new
+    # evidence supersedes the record a verified narrative cites,
+    # the narrative must drop back to stale, then be superseded by
+    # the re-draft on the fresh routing. Nothing is filed: the
+    # case stands in sar_pending throughout, at a verified draft.
+    s_dispositions = DispositionService(
+        s_store, s_store, s_store, s_store, s_evidence, s_workflow
+    )
+    s_sar = SarNarrativeService(
+        s_store, s_store, s_store, s_store, s_evidence
+    )
+
+    # 9a: drafting before the gate routes the case is refused, on
+    # the seed case (still investigating) and on an escalated case
+    # of the main stack alike.
+    try:
+        s_sar.draft_narrative(shipped, actor="eval")
+        counters["sar_draft_non_sar_pending_accepted"] += 1
+    except SarNarrativeRefusedError:
+        pass
+    main_sar = SarNarrativeService(store, store, store, store, evidence)
+    try:
+        main_sar.draft_narrative(inv3, actor="eval")
+        counters["sar_draft_non_sar_pending_accepted"] += 1
+    except SarNarrativeRefusedError:
+        pass
+
+    # 9b: the gate routes the seed case; drafting + verification land.
+    s_workflow.transition(shipped, CaseStatus.AWAITING_ANALYST, actor="eval")
+    s_dispositions.record_disposition(
+        shipped,
+        analyst_id="e.okafor",
+        analyst_role="analyst",
+        outcome=DispositionOutcome.ESCALATE_SAR,
+        rationale_codes=["STRUCTURING_SUSPECTED"],
+        record_id=shipped_record.record_id,
+        record_version=shipped_record.version,
+    )
+    if s_store.get_case(shipped).status is not CaseStatus.SAR_PENDING:
+        counters["sar_positive_paths_failed"] += 1
+    narrative, verification = s_sar.draft_narrative(shipped, actor="eval")
+    counters["sar_narratives_drafted"] += 1
+    if (
+        not verification.all_verified
+        or verification.narrative_problems
+        or s_sar.status_of(narrative) != "verified"
+    ):
+        counters["sar_positive_paths_failed"] += 1
+    else:
+        counters["sar_narratives_verified"] += 1
+
+    # 9c: tampered drafts cannot verify.
+    amounts_section = next(
+        s for s in narrative.sections if s.key == "amounts_and_instruments"
+    )
+    target = next(st for st in amounts_section.statements if st.figures)
+
+    def tamper_sar(source, statement_id, **updates):
+        sections = []
+        for section in source.sections:
+            statements = [
+                st.model_copy(update=updates)
+                if st.statement_id == statement_id
+                else st
+                for st in section.statements
+            ]
+            sections.append(
+                section.model_copy(update={"statements": statements})
+            )
+        return source.model_copy(update={"sections": sections})
+
+    total_value = next(iter(target.figures.values()))
+    altered = str(Decimal(total_value) + Decimal("0.01"))
+    figure_key = next(iter(target.figures.keys()))
+    tampered_figure = tamper_sar(
+        narrative,
+        target.statement_id,
+        text=target.text.replace(total_value, altered),
+        figures={figure_key: altered},
+    )
+    if s_sar.check_narrative(tampered_figure).all_verified:
+        counters["sar_figure_not_in_records_accepted"] += 1
+    dropped_citations = tamper_sar(
+        narrative, target.statement_id, citations=[]
+    )
+    if s_sar.check_narrative(dropped_citations).all_verified:
+        counters["sar_unverifiable_marked_verified"] += 1
+    hidden_questions = narrative.model_copy(
+        update={
+            "sections": [
+                s
+                for s in narrative.sections
+                if s.key != "what_remains_unknown"
+            ]
+        }
+    )
+    if s_sar.check_narrative(hidden_questions).all_verified:
+        counters["sar_open_questions_omitted"] += 1
+    # The stored draft is untouched by the probes and still verifies.
+    if s_sar.status_of(narrative) != "verified":
+        counters["sar_positive_paths_failed"] += 1
+
+    # 9d: staleness, then supersession by the re-draft.
+    s_workflow.transition(shipped, CaseStatus.INVESTIGATING, actor="eval")
+    extra_seed = [
+        etxn(f"S-R{i}", "ACCT-5001", date(2026, 10, 26) + timedelta(days=i),
+             "10000", channel="wire")
+        for i in range(8)
+    ]
+    s_typologies.ingest_transactions(
+        shipped, extra_seed,
+        source_ref="core-banking:ACCT-5001:delta", actor="eval-feed",
+    )
+    s_typologies.run_typologies(
+        shipped, "harborline-typologies", "2026.10.1", actor="eval-runner"
+    )
+    shipped_v2 = s_investigations.run_investigation(
+        shipped, actor="eval-analyst"
+    )
+    if shipped_v2.version != 2 or s_sar.status_of(narrative) != "stale":
+        counters["sar_stale_still_verified"] += 1
+    s_workflow.transition(shipped, CaseStatus.AWAITING_ANALYST, actor="eval")
+    s_dispositions.record_disposition(
+        shipped,
+        analyst_id="e.okafor",
+        analyst_role="analyst",
+        outcome=DispositionOutcome.ESCALATE_SAR,
+        rationale_codes=["STRUCTURING_SUSPECTED"],
+        record_id=shipped_v2.record_id,
+        record_version=shipped_v2.version,
+    )
+    narrative_v2, verification_v2 = s_sar.draft_narrative(
+        shipped, actor="eval"
+    )
+    counters["sar_narratives_drafted"] += 1
+    if (
+        not verification_v2.all_verified
+        or s_sar.status_of(narrative_v2) != "verified"
+        or s_sar.status_of(narrative) != "superseded"
+        or s_store.get_case(shipped).status is not CaseStatus.SAR_PENDING
+    ):
+        counters["sar_positive_paths_failed"] += 1
+    else:
+        counters["sar_narratives_verified"] += 1
+    try:
+        s_evidence.verify_chain(shipped)
+    except Exception:
+        counters["chains_failed"] += 1
+
+    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6 counters")
     for key, value in counters.items():
         print(f"  {key}: {value}")
     zero_tolerance = [
@@ -1223,6 +1394,12 @@ def main() -> int:
         "disposition_stale_unflagged",
         "disposition_stale_citation_accepted",
         "disposition_positive_paths_failed",
+        "sar_draft_non_sar_pending_accepted",
+        "sar_unverifiable_marked_verified",
+        "sar_figure_not_in_records_accepted",
+        "sar_open_questions_omitted",
+        "sar_stale_still_verified",
+        "sar_positive_paths_failed",
     ]
     passed = all(counters[k] == 0 for k in zero_tolerance) and counters["cases_opened"] == len(ALERTS)
     print("GATE: PASS" if passed else "GATE: FAIL")
