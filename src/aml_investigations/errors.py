@@ -144,6 +144,29 @@ class InvestigationRefusedError(InvestigationError):
     hypothesis discipline). Nothing is persisted."""
 
 
+class DispositionError(AmlError):
+    """Base class for disposition-gate (R5) refusals."""
+
+
+class DispositionRefusedError(DispositionError):
+    """A disposition or confirmation was refused at the analyst gate.
+
+    Every refusal carries a named ``reason`` — the gate never says
+    just "no": anonymous_or_system_actor, unknown_role,
+    rationale_codes_required, unknown_rationale_code,
+    case_not_awaiting_analyst, no_investigation_record,
+    record_citation_not_current, unresolved_sanctions_hit,
+    missing_review_period, missing_evidence_required,
+    unknown_evidence_type, no_pending_confirmation,
+    confirmer_role_not_l2, self_confirmation. The refusal is written
+    to the case's audit log before it is raised.
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(f"disposition refused [{reason}]: {message}")
+
+
 class SanctionsHitBlocksCloseError(IllegalTransitionError):
     """A plain close was attempted on a case with an unresolved
     sanctions hit. The case is in a must-escalate posture: the lawful

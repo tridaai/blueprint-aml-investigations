@@ -37,6 +37,9 @@ class CaseStatus(str, enum.Enum):
     ASSEMBLING = "assembling"
     INVESTIGATING = "investigating"
     AWAITING_ANALYST = "awaiting_analyst"
+    PENDING_CONFIRMATION = "pending_confirmation"
+    SAR_PENDING = "sar_pending"
+    MONITORING = "monitoring"
     ESCALATED = "escalated"
     CLOSED = "closed"
     FILED_SAR = "filed_sar"
@@ -682,6 +685,7 @@ class InvestigationRecord(BaseModel):
     record_id: str = Field(default_factory=lambda: _new_id("inv"))
     case_id: str
     version: int = Field(ge=1)
+
     actor: str
     model_profile: str = Field(
         default="offline",
@@ -705,3 +709,132 @@ class InvestigationRecord(BaseModel):
     open_questions: list[OpenQuestion] = Field(default_factory=list)
     prior_case_refs: list[PriorCaseRef] = Field(default_factory=list)
     diff: RecordDiff | None = None
+
+
+# ---------------------------------------------------------------------------
+# Dispositions (R5): the analyst gate — Law 1, with depth
+# ---------------------------------------------------------------------------
+
+
+class DispositionOutcome(str, enum.Enum):
+    """The coded outcomes an analyst disposition can record (R5).
+
+    These are the gate's vocabulary, deliberately smaller and more
+    precise than the R1 transition decisions: a disposition routes
+    the case — it closes it, watches it, escalates it, or sends it
+    back — and each outcome carries its own coded rationale set
+    (see ``dispositions.py``).
+    """
+
+    CLOSE_NO_ACTION = "close_no_action"
+    CLOSE_MONITOR = "close_monitor"
+    ESCALATE_SAR = "escalate_sar"
+    ESCALATE_L2 = "escalate_l2"
+    REQUEST_MORE_EVIDENCE = "request_more_evidence"
+
+
+class DispositionRecord(BaseModel):
+    """One analyst disposition of one case, recorded at the gate (R5).
+
+    The R1 :class:`Disposition` is the state machine's closing
+    token; this is the fuller artefact the gate keeps: who decided
+    (a named analyst id and a coded role — anonymous and system
+    actors are refused by the service, mechanically), what they
+    decided (a coded outcome with coded rationale from a versioned
+    vocabulary — free text may supplement, never substitute), and
+    which investigation-record version the decision relied on.
+
+    Records are append-only: a later disposition supersedes this
+    one in the case view, but this record is never edited. The full
+    record is also captured as a hash-chained evidence item (kind
+    ``disposition``), so the decision sits on the case's
+    chain-of-custody like everything else.
+    """
+
+    disposition_id: str = Field(default_factory=lambda: _new_id("disp"))
+    case_id: str
+    analyst_id: str = Field(min_length=1)
+    analyst_role: str = Field(
+        description="Coded role: analyst | senior_analyst | l2_reviewer."
+    )
+    outcome: DispositionOutcome
+    rationale_codes: list[str] = Field(
+        min_length=1,
+        description="Coded rationale from the outcome's set in the "
+        "versioned vocabulary. Free text alone is refused at the gate.",
+    )
+    rationale_vocabulary_version: str
+    note: str = Field(
+        default="",
+        description="Free-text supplement. Never a substitute for codes.",
+    )
+    record_id: str = Field(
+        description="The investigation record the analyst relied on."
+    )
+    record_version: int = Field(
+        ge=1,
+        description="That record's version. The gate refuses a "
+        "citation of anything but the case's current record.",
+    )
+    requires_confirmation: bool = Field(
+        default=False,
+        description="True when this closure needs a second pair of "
+        "eyes: a close_no_action over an adverse hypothesis. The "
+        "closure takes effect only when an L2 reviewer confirms — "
+        "see DispositionConfirmation.",
+    )
+    review_period_days: int | None = Field(
+        default=None,
+        description="close_monitor only: the enhanced-monitoring "
+        "review period, in days.",
+    )
+    review_due_on: date | None = Field(
+        default=None,
+        description="close_monitor only: decided date + the review "
+        "period — the date the monitoring review falls due.",
+    )
+    missing_evidence: list[str] = Field(
+        default_factory=list,
+        description="request_more_evidence only: the named evidence "
+        "types the case still needs, in the R4 open-question "
+        "vocabulary (e.g. 'source_of_funds_documentation').",
+    )
+    decided_at: datetime = Field(default_factory=_utcnow)
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the disposition evidence item holding this record.",
+    )
+
+
+class ConfirmationOutcome(str, enum.Enum):
+    CONFIRMED = "confirmed"
+    DECLINED = "declined"
+
+
+class DispositionConfirmation(BaseModel):
+    """A second person's answer to a pending-confirmation disposition.
+
+    Dual-control at the gate (Law 1's depth, R5): a close_no_action
+    over an adverse hypothesis does not close the case until an L2
+    reviewer — a different named analyst from the one who
+    dispositioned — confirms it. The confirmer's own refusal to
+    confirm is recorded the same way, with the case sent back to
+    investigation. Like dispositions, confirmations are append-only
+    records and hash-chained evidence items (kind
+    ``disposition_confirmation``).
+    """
+
+    confirmation_id: str = Field(default_factory=lambda: _new_id("conf"))
+    disposition_id: str
+    case_id: str
+    confirmer_id: str = Field(min_length=1)
+    confirmer_role: str = Field(
+        description="Must be the L2 role ('l2_reviewer'); enforced by the service."
+    )
+    outcome: ConfirmationOutcome
+    note: str = ""
+    decided_at: datetime = Field(default_factory=_utcnow)
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the disposition_confirmation evidence item.",
+    )

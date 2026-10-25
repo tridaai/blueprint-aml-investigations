@@ -15,6 +15,8 @@ from .models import (
     Alert,
     AuditEvent,
     Case,
+    DispositionConfirmation,
+    DispositionRecord,
     EvidenceItem,
     InvestigationRecord,
     ListKind,
@@ -218,3 +220,34 @@ class InvestigationStore(Protocol):
     def get_investigation_record(
         self, record_id: str
     ) -> InvestigationRecord | None: ...
+
+
+@runtime_checkable
+class DispositionStore(Protocol):
+    """Persistence for disposition records and confirmations (R5).
+
+    Both are append-only: a disposition is never updated or deleted
+    (a later one supersedes it in the case view), and a confirmation
+    is a separate record answering a disposition — the pair together
+    is the gate's history, exactly as recorded.
+    """
+
+    def add_disposition(self, record: DispositionRecord) -> DispositionRecord: ...
+
+    def list_dispositions(self, case_id: str) -> list[DispositionRecord]: ...
+
+    def get_disposition(
+        self, disposition_id: str
+    ) -> DispositionRecord | None: ...
+
+    def add_confirmation(
+        self, confirmation: DispositionConfirmation
+    ) -> DispositionConfirmation: ...
+
+    def list_confirmations(
+        self, case_id: str
+    ) -> list[DispositionConfirmation]: ...
+
+    def get_confirmation_for(
+        self, disposition_id: str
+    ) -> DispositionConfirmation | None: ...
