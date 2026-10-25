@@ -16,6 +16,7 @@ from .models import (
     AuditEvent,
     Case,
     EvidenceItem,
+    InvestigationRecord,
     ListKind,
     ListSnapshot,
     RulePack,
@@ -194,3 +195,26 @@ class TypologyStore(Protocol):
     def add_finding(self, finding: TypologyFinding) -> TypologyFinding: ...
 
     def list_findings(self, case_id: str) -> list[TypologyFinding]: ...
+
+
+@runtime_checkable
+class InvestigationStore(Protocol):
+    """Persistence for investigation records (R4).
+
+    Records are append-only versions: a new investigation of a case
+    adds the next version; no version is ever updated or deleted —
+    supersession is a pointer on the newer record, so the case's
+    full investigation history stays readable exactly as recorded.
+    """
+
+    def add_investigation_record(
+        self, record: InvestigationRecord
+    ) -> InvestigationRecord: ...
+
+    def list_investigation_records(
+        self, case_id: str
+    ) -> list[InvestigationRecord]: ...
+
+    def get_investigation_record(
+        self, record_id: str
+    ) -> InvestigationRecord | None: ...

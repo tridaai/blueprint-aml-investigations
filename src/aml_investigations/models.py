@@ -520,3 +520,188 @@ class TypologyFinding(BaseModel):
     window_end: date | None = None
     detail: str = Field(description="The rule that fired, in words.")
     created_at: datetime = Field(default_factory=_utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Investigation records (R4): cited findings, hypothesis discipline
+# ---------------------------------------------------------------------------
+
+
+class Citation(BaseModel):
+    """A pointer from a finding to the specific element of a specific
+    evidence item that supports it.
+
+    ``element`` addresses one element inside the evidence item's
+    content: ``finding:<finding_id>``, ``transaction:<txn_id>``,
+    ``hit:<hit_id>``, ``run:<run_id>``, or ``field:<dotted.path>``
+    for a field of a JSON payload. A citation that does not resolve —
+    the item does not exist, or the element is not inside it — is a
+    mechanical refusal at record time, never a warning.
+
+    ``case_id`` is None for the record's own case; a prior case's
+    evidence is cited with its case_id named explicitly.
+    """
+
+    case_id: str | None = None
+    evidence_seq: int = Field(ge=1)
+    element: str = Field(min_length=1)
+
+
+class InvestigationFinding(BaseModel):
+    """One finding in an investigation record.
+
+    A finding is a statement plus its proof: every citation must
+    resolve, and every figure in the statement must trace to a cited
+    record or to the finding's own ``figures`` (which code computed
+    from the cited records). ``direction`` is the finding's stance
+    toward the record's working hypothesis — facts that cut against
+    it are findings too, never edits to the supporting ones.
+    """
+
+    finding_id: str = Field(default_factory=lambda: _new_id("invf"))
+    key: str = Field(
+        description="Deterministic identity across record versions, "
+        "e.g. 'typology:<finding_id>' — the version diff is computed over keys."
+    )
+    kind: str = Field(
+        description="typology | screening | alert | profile | prior_case | counter"
+    )
+    origin: str = Field(
+        description="typology | screening | alert | profile | prior_case | "
+        "counter_search — where the finding's figures came from."
+    )
+    statement: str
+    citations: list[Citation] = Field(default_factory=list)
+    figures: dict[str, str] = Field(
+        default_factory=dict,
+        description="Figures the statement relies on, as exact decimal "
+        "strings, computed by code from the cited records.",
+    )
+    weight: str = Field(description="high | medium | low")
+    direction: str = Field(description="supports | against | context")
+
+
+class CounterCheck(BaseModel):
+    """One named check the counter-evidence search ran.
+
+    The search is a step, not a label: every check that applies to
+    the working hypothesis is run and recorded with its outcome,
+    including the ones that found nothing and the ones that did not
+    apply (with the reason)."""
+
+    name: str
+    description: str
+    outcome: str = Field(
+        description="counter_evidence_found | no_counter_evidence | not_applicable"
+    )
+    detail: str = Field(description="What the check examined and saw, in words.")
+    counter_finding_ids: list[str] = Field(default_factory=list)
+
+
+class CounterSearch(BaseModel):
+    """The record of the counter-evidence search for one hypothesis.
+
+    ``coverage`` states what was actually searched — the transaction
+    span, the profile, the screening results — so a record with zero
+    counter-findings says what was looked through, not merely that
+    nothing was found.
+    """
+
+    ran: bool = True
+    coverage: str
+    checks: list[CounterCheck] = Field(default_factory=list)
+    counter_finding_ids: list[str] = Field(default_factory=list)
+
+
+class Hypothesis(BaseModel):
+    """The investigation's working hypothesis, labelled as one.
+
+    It names the findings that support it and the findings that cut
+    against it; a hypothesis with no counter-findings still carries
+    the counter-search record that looked for them.
+    """
+
+    label: str = Field(
+        description="structuring | velocity | dormancy_then_burst | "
+        "rapid_in_out | round_amount | sanctions_match | no_adverse_pattern"
+    )
+    statement: str
+    supporting_finding_ids: list[str] = Field(default_factory=list)
+    counter_finding_ids: list[str] = Field(default_factory=list)
+
+
+class OpenQuestion(BaseModel):
+    """A question the assembled evidence cannot answer, and the
+    named evidence type that would answer it. An open question is a
+    request for a specific kind of evidence, never a shrug."""
+
+    question: str
+    evidence_needed: str = Field(
+        description="Named evidence type the case does not yet hold, "
+        "e.g. 'source_of_funds_documentation'."
+    )
+    rationale: str = ""
+
+
+class PriorCaseRef(BaseModel):
+    """A reference to another case for the same customer, assembled
+    into the record so the analyst sees the customer's case history.
+    Findings may cite the prior case's alert evidence explicitly."""
+
+    case_id: str
+    alert_id: str
+    rule_id: str
+    status: str
+    detected_on: date
+
+
+class RecordDiff(BaseModel):
+    """How one investigation record differs from the version it
+    supersedes, computed over finding keys (added / removed /
+    changed) plus whether the working hypothesis moved."""
+
+    from_version: int
+    added: list[str] = Field(default_factory=list)
+    removed: list[str] = Field(default_factory=list)
+    changed: list[str] = Field(default_factory=list)
+    hypothesis_changed: bool = False
+
+
+class InvestigationRecord(BaseModel):
+    """One version of a case's investigation.
+
+    The record separates facts (findings, each cited), the working
+    hypothesis (labelled, with its support and its counter-evidence),
+    and open questions (each naming the evidence that would resolve
+    it). The record itself is stored as a hash-chained evidence item
+    (kind ``investigation_record``); a re-run after new evidence
+    arrives produces the next version, which supersedes this one in
+    the case view while this one stays on the chain.
+    """
+
+    record_id: str = Field(default_factory=lambda: _new_id("inv"))
+    case_id: str
+    version: int = Field(ge=1)
+    actor: str
+    model_profile: str = Field(
+        default="offline",
+        description="Composer profile that produced the narrative text. "
+        "'offline' is the deterministic stand-in; a live profile is a "
+        "different composer behind the same port, never a silent swap.",
+    )
+    created_at: datetime = Field(default_factory=_utcnow)
+    input_fingerprint: str = Field(
+        description="Hash of the exact assembled inputs. A re-run over "
+        "identical inputs returns the existing record (idempotent)."
+    )
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the investigation_record evidence item holding this record.",
+    )
+    supersedes_record_id: str | None = None
+    findings: list[InvestigationFinding] = Field(default_factory=list)
+    hypothesis: Hypothesis
+    counter_search: CounterSearch
+    open_questions: list[OpenQuestion] = Field(default_factory=list)
+    prior_case_refs: list[PriorCaseRef] = Field(default_factory=list)
+    diff: RecordDiff | None = None

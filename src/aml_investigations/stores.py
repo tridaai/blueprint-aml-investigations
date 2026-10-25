@@ -22,6 +22,7 @@ from .models import (
     AuditEvent,
     Case,
     EvidenceItem,
+    InvestigationRecord,
     ListKind,
     ListSnapshot,
     RulePack,
@@ -48,6 +49,7 @@ class InMemoryCaseStore:
         self._transactions: dict[str, list[Transaction]] = {}
         self._typology_runs: list[TypologyRun] = []
         self._findings: dict[str, TypologyFinding] = {}
+        self._investigation_records: list[InvestigationRecord] = []
         self._lock = threading.Lock()
 
     def ping(self) -> bool:
@@ -261,6 +263,33 @@ class InMemoryCaseStore:
             for f in self._findings.values()
             if f.case_id == case_id
         ]
+
+    # --- investigations (R4): append-only record versions -----------
+    def add_investigation_record(
+        self, record: InvestigationRecord
+    ) -> InvestigationRecord:
+        with self._lock:
+            self._investigation_records.append(record.model_copy(deep=True))
+        return record
+
+    def list_investigation_records(
+        self, case_id: str
+    ) -> list[InvestigationRecord]:
+        records = [
+            r for r in self._investigation_records if r.case_id == case_id
+        ]
+        return [
+            r.model_copy(deep=True)
+            for r in sorted(records, key=lambda r: r.version)
+        ]
+
+    def get_investigation_record(
+        self, record_id: str
+    ) -> InvestigationRecord | None:
+        for record in self._investigation_records:
+            if record.record_id == record_id:
+                return record.model_copy(deep=True)
+        return None
 
 
 class SqlCaseStore:
@@ -671,3 +700,42 @@ class SqlCaseStore:
             (case_id,),
         )
         return [TypologyFinding.model_validate_json(r["payload"]) for r in rows]
+
+    # --- investigations (R4): append-only record versions -----------
+    def add_investigation_record(
+        self, record: InvestigationRecord
+    ) -> InvestigationRecord:
+        self._execute(
+            "INSERT INTO investigation_records (record_id, case_id, version,"
+            " created_at, payload) VALUES (?, ?, ?, ?, ?)",
+            (
+                record.record_id,
+                record.case_id,
+                record.version,
+                record.created_at.isoformat(),
+                record.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return record
+
+    def list_investigation_records(
+        self, case_id: str
+    ) -> list[InvestigationRecord]:
+        rows = self._fetchall(
+            "SELECT payload FROM investigation_records WHERE case_id = ?"
+            " ORDER BY version ASC",
+            (case_id,),
+        )
+        return [InvestigationRecord.model_validate_json(r["payload"]) for r in rows]
+
+    def get_investigation_record(
+        self, record_id: str
+    ) -> InvestigationRecord | None:
+        row = self._fetchone(
+            "SELECT payload FROM investigation_records WHERE record_id = ?",
+            (record_id,),
+        )
+        return (
+            InvestigationRecord.model_validate_json(row["payload"]) if row else None
+        )
