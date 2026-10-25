@@ -54,6 +54,7 @@ from .composer import (
     ungrounded_figures,
     DEFAULT_PROFILE,
 )
+from .dispositions import flag_dispositions_stale
 from .errors import (
     CaseNotFoundError,
     CitationResolutionError,
@@ -87,6 +88,7 @@ from .models import (
 )
 from .ports import (
     CaseStore,
+    DispositionStore,
     InvestigationStore,
     ScreeningStore,
     TypologyStore,
@@ -600,12 +602,17 @@ class InvestigationService:
         typology_store: TypologyStore,
         investigation_store: InvestigationStore,
         evidence: EvidenceService,
+        disposition_store: DispositionStore | None = None,
     ) -> None:
         self._store = store
         self._screening = screening_store
         self._typologies = typology_store
         self._records = investigation_store
         self._evidence = evidence
+        # R5: when a disposition store is wired, persisting a new
+        # record version flags any disposition that relied on an
+        # older version as stale (the gate's DISPOSITION_STALE flag).
+        self._dispositions = disposition_store
         self._resolver = CitationResolver(store, evidence)
         builder = StateGraph(_State)
         builder.add_node("assemble", self._assemble)
@@ -2170,6 +2177,16 @@ class InvestigationService:
                 },
             )
         )
+        if self._dispositions is not None and record.supersedes_record_id:
+            # A disposition recorded against an older version of
+            # this record now stands on a superseded basis (R5).
+            flag_dispositions_stale(
+                self._store,
+                self._dispositions,
+                record.case_id,
+                current_record_version=record.version,
+                actor=state["actor"],
+            )
         logger.info(
             "investigation recorded for case %s: %s (%d findings, "
             "hypothesis %s)",

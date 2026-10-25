@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from aml_investigations.config import Settings
+from aml_investigations.dispositions import DispositionService
 from aml_investigations.evidence import EvidenceService
 from aml_investigations.intake import IntakeService, ListAlertFeed
 from aml_investigations.investigation import InvestigationService
@@ -52,7 +53,10 @@ def services(tmp_path: Path) -> Services:
     intake = IntakeService(store, feed, evidence)
     screening = ScreeningService(store, store, evidence)
     typologies = TypologyService(store, store, evidence)
-    investigations = InvestigationService(store, store, store, store, evidence)
+    investigations = InvestigationService(
+        store, store, store, store, evidence, disposition_store=store
+    )
+    dispositions = DispositionService(store, store, store, store, evidence, workflow)
     settings = Settings(
         database_url=None,
         sqlite_path=tmp_path / "aml.db",
@@ -80,4 +84,5 @@ def services(tmp_path: Path) -> Services:
         typologies=typologies,
         rule_pack_feed=ListRulePackFeed([]),
         investigations=investigations,
+        dispositions=dispositions,
     )

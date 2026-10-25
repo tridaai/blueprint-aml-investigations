@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .config import Settings, load_settings
+from .dispositions import DispositionService
 from .evidence import EvidenceService
 from .intake import IntakeService, ReferenceAlertFeed
 from .investigation import InvestigationService
@@ -47,6 +48,7 @@ class Services:
     typologies: TypologyService
     rule_pack_feed: RulePackSource
     investigations: InvestigationService
+    dispositions: DispositionService
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -72,7 +74,12 @@ def build_services(settings: Settings | None = None) -> Services:
     transactions = ReferenceTransactionFeed(settings.transaction_streams_path)
     typologies = TypologyService(store, store, evidence)
     rule_pack_feed = ReferenceRulePackFeed(settings.typology_rules_path)
-    investigations = InvestigationService(store, store, store, store, evidence)
+    investigations = InvestigationService(
+        store, store, store, store, evidence, disposition_store=store
+    )
+    dispositions = DispositionService(
+        store, store, store, store, evidence, workflow
+    )
     return Services(
         settings=settings,
         store=store,
@@ -87,4 +94,5 @@ def build_services(settings: Settings | None = None) -> Services:
         typologies=typologies,
         rule_pack_feed=rule_pack_feed,
         investigations=investigations,
+        dispositions=dispositions,
     )
