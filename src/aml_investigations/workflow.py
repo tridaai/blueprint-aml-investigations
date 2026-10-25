@@ -28,6 +28,16 @@ SAR drafting — the drafting itself is R6), and ``monitoring``
 falls due). The disposition service (``dispositions.py``) is what
 drives cases along these edges; the table stays the single source
 of which moves exist at all.
+
+R7 adds one edge: ``sar_pending -> filed_sar``. When the
+dual-control approval gate (``approval.py``) approves the verified
+narrative, the case file is complete, and the approval service
+drives the case along this edge with the closing disposition
+minted from the escalate_sar record (decision ``file_sar``), as
+the closing-token rule below requires. The state's name is the
+case file's terminal SAR state — the blueprint's boundary stands:
+an approved narrative is a sealed case file, and **no SAR is ever
+filed by this system**.
 """
 
 from __future__ import annotations
@@ -83,7 +93,11 @@ TRANSITIONS: dict[CaseStatus, frozenset[CaseStatus]] = {
         }
     ),
     CaseStatus.SAR_PENDING: frozenset(
-        {CaseStatus.INVESTIGATING, CaseStatus.ESCALATED}
+        {
+            CaseStatus.INVESTIGATING,
+            CaseStatus.ESCALATED,
+            CaseStatus.FILED_SAR,  # R7: narrative approved under dual control
+        }
     ),
     CaseStatus.MONITORING: frozenset(
         {CaseStatus.INVESTIGATING}  # the monitoring review re-opens the case

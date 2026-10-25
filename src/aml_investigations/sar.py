@@ -68,11 +68,12 @@ from .errors import (
     NarrativeNotFoundError,
     SarNarrativeRefusedError,
 )
-from .evidence import EvidenceService
+from .evidence import EvidenceService, ensure_case_mutable
 from .investigation import CitationResolver
 from .logging_config import get_logger
 from .models import (
     Alert,
+    ApprovalOutcome,
     AuditEvent,
     Case,
     CaseStatus,
@@ -88,10 +89,12 @@ from .models import (
     StatementVerdict,
 )
 from .ports import (
+    ApprovalStore,
     CaseStore,
     DispositionStore,
     InvestigationStore,
     SarNarrativeStore,
+    SealStore,
 )
 
 logger = get_logger(__name__)
@@ -152,12 +155,22 @@ class SarNarrativeService:
         dispositions: DispositionStore,
         narratives: SarNarrativeStore,
         evidence: EvidenceService,
+        approval_store: ApprovalStore | None = None,
+        seal_store: SealStore | None = None,
     ) -> None:
         self._store = store
         self._records = records
         self._dispositions = dispositions
         self._narratives = narratives
         self._evidence = evidence
+        # R7: when the approval store is wired, standing knows the
+        # dual-control gate's decisions (approved / rejected), and a
+        # rejected draft no longer counts as the standing draft —
+        # re-drafting composes the next version. When a seal store
+        # is wired, drafting and verification refuse on a sealed
+        # case like every other mutating path.
+        self._approvals = approval_store
+        self._seals = seal_store
         self._resolver = CitationResolver(store, evidence)
 
     # -- refusals -----------------------------------------------------
@@ -198,6 +211,7 @@ class SarNarrativeService:
         escalate_sar disposition that routed the case here.
         """
         case = self._require_case(case_id)
+        ensure_case_mutable(self._seals, case_id)
         if not actor or not actor.strip():
             raise self._refuse(
                 case_id,
@@ -262,6 +276,7 @@ class SarNarrativeService:
                 latest.record_id == current.record_id
                 and latest.record_version == current.version
                 and latest.model_profile == profile
+                and not self._was_rejected(latest.narrative_id)
             ):
                 verification = self._narratives.get_verification_for(
                     latest.narrative_id
@@ -1062,6 +1077,7 @@ class SarNarrativeService:
         """Run the verifier over a stored narrative and record the
         run (append-only store row + hash-chained evidence item)."""
         self._require_case(case_id)
+        ensure_case_mutable(self._seals, case_id)
         if narrative_id is None:
             existing = self._narratives.list_narratives(case_id)
             if not existing:
@@ -1132,10 +1148,25 @@ class SarNarrativeService:
     ) -> NarrativeVerification | None:
         return self._narratives.get_verification_for(narrative_id)
 
+    def _was_rejected(self, narrative_id: str) -> bool:
+        """True when the dual-control gate (R7) rejected this
+        narrative version. A rejected version is decided: it keeps
+        its verification history, but it is no longer the standing
+        draft — re-drafting composes the next version."""
+        if self._approvals is None:
+            return False
+        approval = self._approvals.get_approval_for(narrative_id)
+        return (
+            approval is not None
+            and approval.outcome is ApprovalOutcome.REJECTED
+        )
+
     def status_of(self, narrative: SarNarrative) -> str:
         """A narrative's derived standing: superseded (a newer
         draft exists), stale (the record it cites has been
-        superseded — it cannot proceed to approval as-is), verified
+        superseded — it cannot proceed to approval as-is), approved
+        or rejected (the dual-control gate's decision, R7 — a
+        rejected narrative is back at drafting standing), verified
         (the latest verification run passes every statement), or
         draft."""
         siblings = self._narratives.list_narratives(narrative.case_id)
@@ -1148,6 +1179,12 @@ class SarNarrativeService:
             or current.version != narrative.record_version
         ):
             return "stale"
+        if self._approvals is not None:
+            approval = self._approvals.get_approval_for(
+                narrative.narrative_id
+            )
+            if approval is not None:
+                return approval.outcome.value
         verification = self._narratives.get_verification_for(
             narrative.narrative_id
         )
