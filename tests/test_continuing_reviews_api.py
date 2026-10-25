@@ -21,6 +21,7 @@ from aml_investigations.intake import IntakeService, ListAlertFeed
 from aml_investigations.investigation import InvestigationService
 from aml_investigations.models import Alert, RulePack
 from aml_investigations.object_store import LocalObjectStore
+from aml_investigations.quarantine import QuarantineService
 from aml_investigations.reviews import ContinuingReviewService
 from aml_investigations.sar import SarNarrativeService
 from aml_investigations.screening import ListScreeningFeed, ScreeningService
@@ -51,6 +52,8 @@ def services(tmp_path: Path) -> Services:
     store = InMemoryCaseStore()
     objects = LocalObjectStore(tmp_path / "objects")
     evidence = EvidenceService(store, objects, seal_store=store)
+    quarantine = QuarantineService(store, evidence, seal_store=store)
+    evidence.quarantine = quarantine
     workflow = CaseWorkflow(store, screening_store=store)
     feed = ListAlertFeed(
         [identity_alert("ALRT-S-1"), identity_alert("ALRT-R9-2")]
@@ -58,9 +61,15 @@ def services(tmp_path: Path) -> Services:
     clocks = RegulatoryClockService(
         store, store, store, evidence, approvals=store, review_store=store
     )
-    intake = IntakeService(store, feed, evidence, clock_service=clocks)
-    screening = ScreeningService(store, store, evidence, seal_store=store)
-    typologies = TypologyService(store, store, evidence, seal_store=store)
+    intake = IntakeService(
+        store, feed, evidence, clock_service=clocks, quarantine=quarantine
+    )
+    screening = ScreeningService(
+        store, store, evidence, seal_store=store, quarantine=quarantine
+    )
+    typologies = TypologyService(
+        store, store, evidence, seal_store=store, quarantine=quarantine
+    )
     investigations = InvestigationService(
         store,
         store,
@@ -69,6 +78,7 @@ def services(tmp_path: Path) -> Services:
         evidence,
         disposition_store=store,
         seal_store=store,
+        quarantine=quarantine,
     )
     dispositions = DispositionService(
         store, store, store, store, evidence, workflow, seal_store=store
@@ -82,6 +92,7 @@ def services(tmp_path: Path) -> Services:
         approval_store=store,
         seal_store=store,
         review_store=store,
+        quarantine=quarantine,
     )
     approvals = SarApprovalService(
         store, store, store, store, sar, evidence, workflow, seal_store=store
@@ -101,6 +112,7 @@ def services(tmp_path: Path) -> Services:
         clocks,
         dispositions,
         seal_store=store,
+        quarantine=quarantine,
     )
     settings = Settings(
         database_url=None,
@@ -139,6 +151,7 @@ def services(tmp_path: Path) -> Services:
         sealing=sealing,
         clocks=clocks,
         reviews=reviews,
+        quarantine=quarantine,
     )
 
 
