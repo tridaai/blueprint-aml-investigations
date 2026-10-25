@@ -17,6 +17,11 @@ Usage:
     aml-agent run-typologies <case_id> --pack ID --version V
                                     run the typology engine over the case
     aml-agent findings <case_id>    list a case's typology findings
+    aml-agent investigate <case_id> [--profile P]
+                                    run the investigation graph and
+                                    record the investigation record
+    aml-agent investigation <case_id>
+                                    show the current record + history
 """
 
 from __future__ import annotations
@@ -59,6 +64,12 @@ def main(argv: list[str] | None = None) -> int:
     p_run_typo.add_argument("--actor", default="typology-service")
     p_findings = sub.add_parser("findings")
     p_findings.add_argument("case_id")
+    p_investigate = sub.add_parser("investigate")
+    p_investigate.add_argument("case_id")
+    p_investigate.add_argument("--profile", default="offline")
+    p_investigate.add_argument("--actor", default="investigation-service")
+    p_investigation = sub.add_parser("investigation")
+    p_investigation.add_argument("case_id")
     args = parser.parse_args(argv)
 
     services = build_services()
@@ -172,6 +183,35 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 json.dumps(
                     [f.model_dump(mode="json") for f in findings], indent=2
+                )
+            )
+        elif args.command == "investigate":
+            record = services.investigations.run_investigation(
+                args.case_id, actor=args.actor, profile=args.profile
+            )
+            print(json.dumps(record.model_dump(mode="json"), indent=2))
+        elif args.command == "investigation":
+            if services.store.get_case(args.case_id) is None:
+                print(f"case not found: {args.case_id}", file=sys.stderr)
+                return 1
+            current = services.investigations.current_record(args.case_id)
+            print(
+                json.dumps(
+                    {
+                        "case_id": args.case_id,
+                        "current": (
+                            current.model_dump(mode="json")
+                            if current is not None
+                            else None
+                        ),
+                        "history": [
+                            r.model_dump(mode="json")
+                            for r in services.investigations.record_history(
+                                args.case_id
+                            )
+                        ],
+                    },
+                    indent=2,
                 )
             )
     except AmlError as exc:

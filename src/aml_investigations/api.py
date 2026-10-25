@@ -2,10 +2,12 @@
 
 Endpoints cover the intake -> case -> evidence spine (R1), the
 screening surface (R2): snapshot ingest, pinned screening runs, hit
-disposition, and the typology surface (R3): rule-pack registration,
-evidence-backed transaction ingestion, engine runs, findings.
-Investigation narrative work (findings drafting, SAR) arrives in
-later rounds behind the same case/evidence model.
+disposition, the typology surface (R3): rule-pack registration,
+evidence-backed transaction ingestion, engine runs, findings, and
+the investigation surface (R4): run the investigation graph for a
+case, fetch the current investigation record and its version
+history. SAR drafting arrives in later rounds behind the same
+case/evidence model.
 """
 
 from __future__ import annotations
@@ -27,6 +29,8 @@ from .errors import (
     EvidenceNotFoundError,
     HitNotFoundError,
     IllegalTransitionError,
+    InvestigationError,
+    InvestigationStateError,
     NoTransactionsError,
     RulePackImmutableError,
     RulePackNotFoundError,
@@ -107,6 +111,16 @@ class TypologyRunRequest(BaseModel):
     pack_id: str = Field(min_length=1)
     version: str = Field(min_length=1)
     actor: str = Field(min_length=1)
+
+
+class InvestigationRunRequest(BaseModel):
+    actor: str = Field(min_length=1)
+    profile: str = Field(
+        default="offline",
+        description="Model profile for narrative composition. "
+        "'offline' is the deterministic default; a live profile "
+        "must be configured in the deployment.",
+    )
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -195,6 +209,14 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     @app.exception_handler(TypologyError)
     async def _typology_error(_request: Request, exc: TypologyError):
+        return _error(422, str(exc))
+
+    @app.exception_handler(InvestigationStateError)
+    async def _investigation_state(_request: Request, exc: InvestigationStateError):
+        return _error(409, str(exc))
+
+    @app.exception_handler(InvestigationError)
+    async def _investigation_error(_request: Request, exc: InvestigationError):
         return _error(422, str(exc))
 
     @app.get("/health")
@@ -430,6 +452,31 @@ def create_app(services: Services | None = None) -> FastAPI:
             "findings": [
                 f.model_dump(mode="json")
                 for f in services.typologies.list_findings(case_id)
+            ],
+        }
+
+    # --- investigations (R4) -----------------------------------------
+    @app.post("/cases/{case_id}/investigation/run", status_code=201)
+    async def run_investigation(case_id: str, payload: InvestigationRunRequest):
+        case_id_var.set(case_id)
+        record = services.investigations.run_investigation(
+            case_id, actor=payload.actor, profile=payload.profile
+        )
+        return record.model_dump(mode="json")
+
+    @app.get("/cases/{case_id}/investigation")
+    async def get_investigation(case_id: str):
+        if services.store.get_case(case_id) is None:
+            raise CaseNotFoundError(case_id)
+        current = services.investigations.current_record(case_id)
+        return {
+            "case_id": case_id,
+            "current": (
+                current.model_dump(mode="json") if current is not None else None
+            ),
+            "history": [
+                r.model_dump(mode="json")
+                for r in services.investigations.record_history(case_id)
             ],
         }
 
