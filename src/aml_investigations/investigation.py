@@ -230,13 +230,22 @@ def _allowed_for(
     case_id: str,
     citations: list[Citation],
     figures: dict[str, str],
+    quarantine=None,
 ) -> set[Decimal]:
     """The figure tokens a statement over these citations may use:
     every numeric token of every resolved element, plus the tokens
-    of the finding's own code-computed figures."""
+    of the finding's own code-computed figures. R10: with
+    quarantine wired, the resolved tokens are computed with
+    quarantined instruction spans masked out — a figure that
+    appears only inside an injection payload grounds nothing here,
+    whatever the finding cites."""
     allowed: set[Decimal] = set()
     for citation in citations:
-        allowed |= tokens_of(resolver.resolve(citation, case_id))
+        resolved = resolver.resolve(citation, case_id)
+        if quarantine is not None:
+            allowed |= quarantine.grounding_tokens(case_id, citation, resolved)
+        else:
+            allowed |= tokens_of(resolved)
     for value in figures.values():
         allowed |= numeric_tokens(value)
     return allowed
@@ -605,12 +614,19 @@ class InvestigationService:
         evidence: EvidenceService,
         disposition_store: DispositionStore | None = None,
         seal_store: SealStore | None = None,
+        quarantine=None,
     ) -> None:
         self._store = store
         self._screening = screening_store
         self._typologies = typology_store
         self._records = investigation_store
         self._evidence = evidence
+        # R10 (Law 7): when wired, draft values drawn from
+        # untrusted text reach the composer fenced, and every
+        # grounding computation in this service — the composer's
+        # allowed set and the record gate's cited tokens — masks
+        # quarantined spans out of the groundable token set.
+        self._quarantine = quarantine
         # R7: a sealed case file is read-only — run_investigation
         # refuses before the state check, so a sealed closed case
         # hears the seal refusal, not a state complaint.
@@ -681,13 +697,26 @@ class InvestigationService:
 
     # -- the record gate ------------------------------------------------
 
+    def _fence(
+        self, case_id: str, evidence_seq: int, field: str, text: str
+    ) -> str:
+        """One untrusted value as the composer may see it (R10):
+        fenced when it carries a quarantined span, verbatim when
+        it does not or when no quarantine service is wired."""
+        if self._quarantine is None:
+            return text
+        return self._quarantine.fence_field(case_id, evidence_seq, field, text)
+
     def verify_record(self, record: InvestigationRecord) -> None:
         """The mechanical record-time gate. Raises
         :class:`InvestigationRefusedError` listing every problem:
         an uncited finding, a citation that does not resolve, a
         figure that does not trace to the cited records, a statement
         carrying an ungrounded figure, or broken hypothesis
-        discipline. A record that fails here is never stored."""
+        discipline. A record that fails here is never stored. R10:
+        with quarantine wired, the cited token set masks
+        quarantined spans — a figure supported only by an
+        instruction payload fails here like any ungrounded figure."""
         problems: list[str] = []
         findings = {f.finding_id: f for f in record.findings}
         if len(findings) != len(record.findings):
@@ -705,7 +734,12 @@ class InvestigationService:
                         f"finding {finding.finding_id}: {exc}"
                     )
                     continue
-                cited_tokens |= tokens_of(resolved)
+                if self._quarantine is not None:
+                    cited_tokens |= self._quarantine.grounding_tokens(
+                        record.case_id, citation, resolved
+                    )
+                else:
+                    cited_tokens |= tokens_of(resolved)
             if finding.origin in (
                 "typology",
                 "screening",
@@ -899,7 +933,11 @@ class InvestigationService:
         def make(**kwargs) -> _Draft:
             draft = _Draft(**kwargs, allowed=set())
             draft.allowed = _allowed_for(
-                self._resolver, case_id, draft.citations, draft.figures
+                self._resolver,
+                case_id,
+                draft.citations,
+                draft.figures,
+                quarantine=self._quarantine,
             )
             return draft
 
@@ -984,9 +1022,23 @@ class InvestigationService:
                     direction=direction,
                     template=template,
                     values={
-                        "subject_name": hit.subject_name,
+                        # R10: both names are untrusted text (the
+                        # subject's side and the vendor's side); a
+                        # quarantined span reaches the composer only
+                        # as the fence marker, never as prose.
+                        "subject_name": self._fence(
+                            case_id,
+                            screening_run.evidence_seq,
+                            f"hit:{hit.hit_id}.subject_name",
+                            hit.subject_name,
+                        ),
                         "list_phrase": list_phrase,
-                        "entry_name": hit.entry_name,
+                        "entry_name": self._fence(
+                            case_id,
+                            screening_run.evidence_seq,
+                            f"hit:{hit.hit_id}.entry_name",
+                            hit.entry_name,
+                        ),
                         "score": str(hit.score),
                         "strength": hit.strength,
                         "status": hit.status.value,
@@ -1039,7 +1091,17 @@ class InvestigationService:
                     "rule_id": alert.rule_id,
                     "detected_on": alert.detected_on.isoformat(),
                     "severity": alert.severity.value,
-                    "summary": alert.summary,
+                    # R10: the alert summary is upstream text; a
+                    # quarantined span reaches the composer only as
+                    # the fence marker. The finding's text is then
+                    # byte-identical to the clean run everywhere the
+                    # payload was not, and the payload is absent.
+                    "summary": self._fence(
+                        case_id,
+                        state["alert_seq"],
+                        "summary",
+                        alert.summary,
+                    ),
                 },
                 figures={},
                 citations=[
@@ -1187,7 +1249,11 @@ class InvestigationService:
     def _counter_draft(self, state: _State, **kwargs) -> _Draft:
         draft = _Draft(**kwargs, allowed=set())
         draft.allowed = _allowed_for(
-            self._resolver, state["case_id"], draft.citations, draft.figures
+            self._resolver,
+            state["case_id"],
+            draft.citations,
+            draft.figures,
+            quarantine=self._quarantine,
         )
         return draft
 

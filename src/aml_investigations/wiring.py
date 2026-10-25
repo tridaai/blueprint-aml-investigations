@@ -28,6 +28,7 @@ from .ports import (
     ScreeningListSource,
     TransactionSource,
 )
+from .quarantine import QuarantineService
 from .reviews import ContinuingReviewService
 from .sar import SarNarrativeService
 from .screening import ReferenceScreeningFeed, ScreeningService
@@ -59,6 +60,7 @@ class Services:
     sealing: CaseSealingService
     clocks: RegulatoryClockService
     reviews: ContinuingReviewService
+    quarantine: QuarantineService
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -76,16 +78,28 @@ def build_services(settings: Settings | None = None) -> Services:
     else:
         objects = LocalObjectStore(settings.object_store_dir)
     evidence = EvidenceService(store, objects, seal_store=store)
+    # R10: the quarantine service (Law 7). It writes through the
+    # evidence funnel, so it is built after the funnel and then
+    # attached as the funnel's scan hook; every ingestion and
+    # consuming service takes it as the same shared instance.
+    quarantine = QuarantineService(store, evidence, seal_store=store)
+    evidence.quarantine = quarantine
     workflow = CaseWorkflow(store, screening_store=store)
     alerts = ReferenceAlertFeed(settings.seed_alerts_path)
     clocks = RegulatoryClockService(
         store, store, store, evidence, approvals=store, review_store=store
     )
-    intake = IntakeService(store, alerts, evidence, clock_service=clocks)
-    screening = ScreeningService(store, store, evidence, seal_store=store)
+    intake = IntakeService(
+        store, alerts, evidence, clock_service=clocks, quarantine=quarantine
+    )
+    screening = ScreeningService(
+        store, store, evidence, seal_store=store, quarantine=quarantine
+    )
     screening_feed = ReferenceScreeningFeed(settings.screening_lists_path)
     transactions = ReferenceTransactionFeed(settings.transaction_streams_path)
-    typologies = TypologyService(store, store, evidence, seal_store=store)
+    typologies = TypologyService(
+        store, store, evidence, seal_store=store, quarantine=quarantine
+    )
     rule_pack_feed = ReferenceRulePackFeed(settings.typology_rules_path)
     investigations = InvestigationService(
         store,
@@ -95,6 +109,7 @@ def build_services(settings: Settings | None = None) -> Services:
         evidence,
         disposition_store=store,
         seal_store=store,
+        quarantine=quarantine,
     )
     dispositions = DispositionService(
         store, store, store, store, evidence, workflow, seal_store=store
@@ -108,6 +123,7 @@ def build_services(settings: Settings | None = None) -> Services:
         approval_store=store,
         seal_store=store,
         review_store=store,
+        quarantine=quarantine,
     )
     approvals = SarApprovalService(
         store, store, store, store, sar, evidence, workflow, seal_store=store
@@ -127,6 +143,7 @@ def build_services(settings: Settings | None = None) -> Services:
         clocks,
         dispositions,
         seal_store=store,
+        quarantine=quarantine,
     )
     return Services(
         settings=settings,
@@ -148,4 +165,5 @@ def build_services(settings: Settings | None = None) -> Services:
         sealing=sealing,
         clocks=clocks,
         reviews=reviews,
+        quarantine=quarantine,
     )

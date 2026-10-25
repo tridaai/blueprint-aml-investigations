@@ -85,11 +85,17 @@ class IntakeService:
         source: AlertSource,
         evidence: EvidenceService,
         clock_service: RegulatoryClockService | None = None,
+        quarantine=None,
     ) -> None:
         self._store = store
         self._source = source
         self._evidence = evidence
         self._clocks = clock_service
+        # R10 (Law 7): when wired, the alert's untrusted text —
+        # its summary and every string in its raw payload (names,
+        # counterparties) — is scanned as the payload lands, and
+        # matches are quarantined on the case chain.
+        self._quarantine = quarantine
 
     def open_case(self, alert_id: str, *, actor: str = "intake-service") -> Case:
         existing = self._store.get_case_by_alert(alert_id)
@@ -128,13 +134,29 @@ class IntakeService:
         )
         # The verbatim alert payload is the case file's first evidence
         # item — everything later cites back to evidence, starting here.
-        self._evidence.add_item(
+        payload_item = self._evidence.add_item(
             case.case_id,
             kind="alert_payload",
             content=alert.model_dump_json(indent=2).encode("utf-8"),
             source_ref=f"monitoring-feed:{alert.alert_id}",
             captured_by=actor,
         )
+        # R10 (Law 7): the payload's text is untrusted — the
+        # monitoring feed repeats what customers and counterparties
+        # wrote. An instruction found in it is quarantined as a
+        # case event, never obeyed; the payload itself stands.
+        if self._quarantine is not None:
+            from .quarantine import iter_text_fields
+
+            fields = {"summary": alert.summary}
+            fields.update(iter_text_fields(alert.raw or {}, "raw"))
+            self._quarantine.record_scan(
+                case.case_id,
+                source_kind="alert_payload",
+                evidence_seq=payload_item.seq,
+                fields=fields,
+                actor=actor,
+            )
         # R8: the continuing-activity trigger. A new case for a
         # customer whose prior case reached filed_sar starts a
         # 90/120-day continuing-activity clock, linked on this

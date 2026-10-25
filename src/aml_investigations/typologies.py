@@ -542,11 +542,16 @@ class TypologyService:
         typology_store: TypologyStore,
         evidence: EvidenceService,
         seal_store: SealStore | None = None,
+        quarantine=None,
     ) -> None:
         self._store = store
         self._typology = typology_store
         self._evidence = evidence
         self._seals = seal_store
+        # R10 (Law 7): when wired, transaction memos and
+        # counterparty names — text written outside the bank — are
+        # scanned as each batch lands and matches quarantined.
+        self._quarantine = quarantine
 
     # -- rule packs -----------------------------------------------------
 
@@ -654,6 +659,27 @@ class TypologyService:
             captured_by=actor,
         )
         batch = batch.model_copy(update={"evidence_seq": item.seq})
+        # R10 (Law 7): memos and counterparty names are untrusted
+        # text riding on the batch. A match quarantines the span —
+        # the batch stands as evidence exactly as delivered, and a
+        # re-delivered batch (returned above) never double-records.
+        if self._quarantine is not None:
+            text_fields: dict[str, str] = {}
+            for txn in transactions:
+                if txn.memo:
+                    text_fields[f"transaction:{txn.transaction_id}.memo"] = txn.memo
+                if txn.counterparty:
+                    text_fields[
+                        f"transaction:{txn.transaction_id}.counterparty"
+                    ] = txn.counterparty
+            if text_fields:
+                self._quarantine.record_scan(
+                    case_id,
+                    source_kind="transaction_batch",
+                    evidence_seq=item.seq,
+                    fields=text_fields,
+                    actor=actor,
+                )
         self._typology.add_transaction_batch(batch)
         self._typology.add_transactions(case_id, batch.batch_id, transactions)
         self._store.append_audit(

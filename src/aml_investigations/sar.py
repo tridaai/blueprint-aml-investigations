@@ -170,12 +170,18 @@ class SarNarrativeService:
         approval_store: ApprovalStore | None = None,
         seal_store: SealStore | None = None,
         review_store: ContinuingReviewStore | None = None,
+        quarantine=None,
     ) -> None:
         self._store = store
         self._records = records
         self._dispositions = dispositions
         self._narratives = narratives
         self._evidence = evidence
+        # R10 (Law 7): when wired, the subject's name reaches the
+        # narrative fenced when it carries a quarantined span, and
+        # every grounding computation in this service masks
+        # quarantined spans out of the groundable token set.
+        self._quarantine = quarantine
         # R7: when the approval store is wired, standing knows the
         # dual-control gate's decisions (approved / rejected), and a
         # rejected draft no longer counts as the standing draft —
@@ -432,7 +438,18 @@ class SarNarrativeService:
         if alert is not None:
             raw = alert.raw or {}
             if isinstance(raw.get("customer_name"), str):
+                # R10: the name is untrusted payload text; if it
+                # carries a quarantined span, the narrative carries
+                # it fenced — the statement's value then traces to
+                # the evidence exactly as fenced, and verification
+                # compares against the same fenced form.
                 name = raw["customer_name"]
+                if self._quarantine is not None:
+                    alert_seq = self._alert_evidence_seq(case_id)
+                    if alert_seq is not None:
+                        name = self._quarantine.fence_field(
+                            case_id, alert_seq, "raw.customer_name", name
+                        )
             if isinstance(raw.get("customer_dob"), str):
                 dob = raw["customer_dob"]
             raw_ids = raw.get("customer_identifiers")
@@ -462,6 +479,17 @@ class SarNarrativeService:
                         # match at screening) is itself the
                         # disambiguator; the entry's facts are not
                         # the subject's and are never restated as such.
+                        # R10: the name reaches the narrative fenced
+                        # when it carries a quarantined span.
+                        if self._quarantine is not None and element.get(
+                            "hit_id"
+                        ):
+                            hit_name = self._quarantine.fence_field(
+                                case_id,
+                                citation.evidence_seq,
+                                f"hit:{element['hit_id']}.subject_name",
+                                hit_name,
+                            )
                         name = name or hit_name
                         break
                 if name is not None:
@@ -501,6 +529,14 @@ class SarNarrativeService:
 
     # -- composition ----------------------------------------------------
 
+    def _grounded(self, case_id: str, citation: Citation, resolved) -> set[Decimal]:
+        """One resolved element's groundable tokens (R10): with
+        quarantine wired, quarantined instruction spans are masked
+        out before tokenising."""
+        if self._quarantine is not None:
+            return self._quarantine.grounding_tokens(case_id, citation, resolved)
+        return tokens_of(resolved)
+
     def _cited_tokens(
         self, case_id: str, finding: InvestigationFinding
     ) -> set[Decimal]:
@@ -510,7 +546,7 @@ class SarNarrativeService:
                 resolved = self._resolver.resolve(citation, case_id)
             except CitationResolutionError:
                 continue
-            tokens |= tokens_of(resolved)
+            tokens |= self._grounded(case_id, citation, resolved)
         return tokens
 
     def _restate(
@@ -555,7 +591,7 @@ class SarNarrativeService:
                 resolved = self._resolver.resolve(citation, case_id)
             except CitationResolutionError:
                 continue
-            allowed |= tokens_of(resolved)
+            allowed |= self._grounded(case_id, citation, resolved)
         for value in list(values.values()) + list((figures or {}).values()):
             allowed |= numeric_tokens(value)
         text = composer.compose(
@@ -1098,16 +1134,23 @@ class SarNarrativeService:
             )
             return problems
         resolved_elements: list[object] = []
+        cited_tokens: set[Decimal] = set()
         for citation in statement.citations:
             try:
-                resolved_elements.append(
-                    self._resolver.resolve(citation, narrative.case_id)
-                )
+                resolved = self._resolver.resolve(citation, narrative.case_id)
             except CitationResolutionError as exc:
                 problems.append(f"citation does not resolve: {exc}")
-        cited_tokens: set[Decimal] = set()
-        for element in resolved_elements:
-            cited_tokens |= tokens_of(element)
+                continue
+            resolved_elements.append(resolved)
+            # R10: tokens ground against the span-masked element,
+            # and the value blob below is built from the fenced
+            # element — a statement value matches the evidence
+            # exactly as the composer was allowed to see it.
+            cited_tokens |= self._grounded(narrative.case_id, citation, resolved)
+            if self._quarantine is not None:
+                resolved_elements[-1] = self._quarantine.fenced_value(
+                    narrative.case_id, citation, resolved
+                )
         for finding_id in statement.finding_ids:
             if finding_id not in finding_ids:
                 problems.append(

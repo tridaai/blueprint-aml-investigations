@@ -214,11 +214,18 @@ class ScreeningService:
         screening_store: ScreeningStore,
         evidence: EvidenceService,
         seal_store: SealStore | None = None,
+        quarantine=None,
     ) -> None:
         self._store = store
         self._screening = screening_store
         self._evidence = evidence
         self._seals = seal_store
+        # R10 (Law 7): when wired, the names a run produces —
+        # subject names from the alert payload and entry names from
+        # the list vendor — are scanned as the result lands and
+        # matches quarantined, so a name carrying an instruction
+        # reaches the investigation record only fenced.
+        self._quarantine = quarantine
 
     # -- snapshot ingest ------------------------------------------------
 
@@ -475,6 +482,23 @@ class ScreeningService:
             captured_by=actor,
         )
         run = run.model_copy(update={"evidence_seq": item.seq})
+        # R10 (Law 7): the run's names are untrusted text from two
+        # directions — the subject's side (alert payload) and the
+        # list vendor's side (entry names). Matches quarantine here;
+        # matching itself is deterministic code over the raw names
+        # and is unaffected either way.
+        if self._quarantine is not None and hits:
+            name_fields: dict[str, str] = {}
+            for hit in hits:
+                name_fields[f"hit:{hit.hit_id}.subject_name"] = hit.subject_name
+                name_fields[f"hit:{hit.hit_id}.entry_name"] = hit.entry_name
+            self._quarantine.record_scan(
+                case_id,
+                source_kind="screening_result",
+                evidence_seq=item.seq,
+                fields=name_fields,
+                actor=actor,
+            )
         self._screening.add_screening_run(run)
 
         # Refresh the case's screening record.

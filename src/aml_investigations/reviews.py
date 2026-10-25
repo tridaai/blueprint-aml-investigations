@@ -159,6 +159,7 @@ class ContinuingReviewService:
         clocks: RegulatoryClockService,
         disposition_gate: DispositionService,
         seal_store: SealStore | None = None,
+        quarantine=None,
     ) -> None:
         self._store = store
         self._records = records
@@ -171,6 +172,9 @@ class ContinuingReviewService:
         self._clocks = clocks
         self._gate = disposition_gate
         self._seals = seal_store
+        # R10 (Law 7): when wired, the review gate's cited tokens
+        # mask quarantined spans like every other verifier.
+        self._quarantine = quarantine
         self._resolver = CitationResolver(store, evidence)
 
     # -- refusals / lookups ------------------------------------------
@@ -322,7 +326,12 @@ class ContinuingReviewService:
                         f"{label}: citation does not resolve ({exc})"
                     )
                     continue
-                cited_tokens |= tokens_of(resolved)
+                if self._quarantine is not None:
+                    cited_tokens |= self._quarantine.grounding_tokens(
+                        review.case_id, citation, resolved
+                    )
+                else:
+                    cited_tokens |= tokens_of(resolved)
             allowed = cited_tokens | set().union(
                 *(numeric_tokens(v) for v in item.figures.values()),
                 set(),
