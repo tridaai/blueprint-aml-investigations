@@ -158,6 +158,19 @@ Usage:
                                     per-signal breakdowns
     aml-agent media-assessment <case_id> <assessment_id>
                                     one assessment in detail
+    aml-agent model-profiles      the model gateway's profiles:
+                                    model, price, configured state,
+                                    the price-table version, and the
+                                    per-case budget cap (R13)
+    aml-agent case-costs <case_id>
+                                    the case's drafting-cost rollup:
+                                    totals by purpose and by profile,
+                                    with the budget position
+    aml-agent case-ledger <case_id>
+                                    every priced model call recorded
+                                    for the case, in call order
+    aml-agent portfolio-costs     the portfolio rollup: all ledgered
+                                    calls grouped by day and profile
 """
 
 from __future__ import annotations
@@ -335,6 +348,12 @@ def main(argv: list[str] | None = None) -> int:
     p_media_one = sub.add_parser("media-assessment")
     p_media_one.add_argument("case_id")
     p_media_one.add_argument("assessment_id")
+    sub.add_parser("model-profiles")
+    p_case_costs = sub.add_parser("case-costs")
+    p_case_costs.add_argument("case_id")
+    p_case_ledger = sub.add_parser("case-ledger")
+    p_case_ledger.add_argument("case_id")
+    sub.add_parser("portfolio-costs")
     args = parser.parse_args(argv)
 
     services = build_services()
@@ -906,6 +925,47 @@ def main(argv: list[str] | None = None) -> int:
                 args.case_id, args.assessment_id
             )
             print(json.dumps(assessment.model_dump(mode="json"), indent=2))
+        elif args.command == "model-profiles":
+            gateway = services.gateway
+            print(
+                json.dumps(
+                    {
+                        "profiles_version": gateway.config.profiles_version,
+                        "price_table": {
+                            "version": gateway.price_table.version,
+                            "as_of": gateway.price_table.as_of.isoformat(),
+                        },
+                        "case_budget_usd": (
+                            format(gateway.case_budget_usd, "f")
+                            if gateway.case_budget_usd is not None
+                            else None
+                        ),
+                        "profiles": gateway.profile_summaries(),
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "case-costs":
+            print(
+                json.dumps(
+                    services.gateway.case_rollup(args.case_id), indent=2
+                )
+            )
+        elif args.command == "case-ledger":
+            entries = services.store.list_call_entries(args.case_id)
+            print(
+                json.dumps(
+                    [e.model_dump(mode="json") for e in entries],
+                    indent=2,
+                )
+            )
+        elif args.command == "portfolio-costs":
+            print(
+                json.dumps(
+                    {"rows": services.gateway.portfolio_rollup()},
+                    indent=2,
+                )
+            )
     except AmlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

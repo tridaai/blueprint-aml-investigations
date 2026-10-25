@@ -24,7 +24,11 @@ version history, and read the counterparty views — per customer,
 one counterparty in detail, and the shared-counterparty network
 view, and the adverse-media surface (R12): search the media port
 for a case's subject (candidates ingested as evidence, scored in
-code), list a case's assessments, and read one in detail. No
+code), list a case's assessments, and read one in detail, and the
+model gateway surface (R13): the gateway's profiles with their
+prices and configured state, a case's priced model-call ledger
+and cost rollup (by purpose and by profile, with the budget
+position), and the portfolio's per-day, per-profile spend. No
 endpoint files a SAR — none exists; the blueprint ends at an
 approved, sealed case file.
 """
@@ -58,6 +62,10 @@ from .errors import (
     InvestigationStateError,
     MediaNotFoundError,
     MediaRefusedError,
+    ModelBudgetExceededError,
+    ModelGatewayError,
+    ModelProfileConfigError,
+    ModelProfileNotConfiguredError,
     NarrativeNotFoundError,
     NoTransactionsError,
     ProfileNotFoundError,
@@ -74,6 +82,7 @@ from .errors import (
     SnapshotNotFoundError,
     TransactionMismatchError,
     TypologyError,
+    UnknownModelProfileError,
 )
 from .logging_config import (
     case_id_var,
@@ -473,6 +482,32 @@ def create_app(services: Services | None = None) -> FastAPI:
         _request: Request, exc: MediaNotFoundError
     ):
         return _error(404, str(exc))
+
+    @app.exception_handler(ModelBudgetExceededError)
+    async def _model_budget(_request: Request, exc: ModelBudgetExceededError):
+        return _error(429, str(exc))
+
+    @app.exception_handler(UnknownModelProfileError)
+    async def _unknown_profile(
+        _request: Request, exc: UnknownModelProfileError
+    ):
+        return _error(422, str(exc))
+
+    @app.exception_handler(ModelProfileNotConfiguredError)
+    async def _profile_not_configured(
+        _request: Request, exc: ModelProfileNotConfiguredError
+    ):
+        return _error(422, str(exc))
+
+    @app.exception_handler(ModelProfileConfigError)
+    async def _profile_config(
+        _request: Request, exc: ModelProfileConfigError
+    ):
+        return _error(422, str(exc))
+
+    @app.exception_handler(ModelGatewayError)
+    async def _gateway_error(_request: Request, exc: ModelGatewayError):
+        return _error(422, str(exc))
 
     @app.get("/health")
     async def health():
@@ -1264,6 +1299,59 @@ def create_app(services: Services | None = None) -> FastAPI:
         return services.media.get_assessment(
             case_id, assessment_id
         ).model_dump(mode="json")
+
+    # -- model gateway surface (R13) -------------------------------
+
+    @app.get("/model/profiles")
+    async def model_profiles():
+        """Every model profile the gateway holds — model, price,
+        and whether this deployment has configured it — plus the
+        price-table version and the per-case budget cap. Key
+        values never appear; only variable names and flags."""
+        gateway = services.gateway
+        return {
+            "profiles_version": gateway.config.profiles_version,
+            "price_table": {
+                "version": gateway.price_table.version,
+                "as_of": gateway.price_table.as_of.isoformat(),
+            },
+            "case_budget_usd": (
+                format(gateway.case_budget_usd, "f")
+                if gateway.case_budget_usd is not None
+                else None
+            ),
+            "profiles": gateway.profile_summaries(),
+        }
+
+    @app.get("/cases/{case_id}/model-ledger")
+    async def case_model_ledger(case_id: str):
+        """Every priced model call recorded for the case, in call
+        order — profile, model, tokens and their basis, the unit
+        prices applied, and the exact cost of each call."""
+        case_id_var.set(case_id)
+        if services.store.get_case(case_id) is None:
+            raise CaseNotFoundError(case_id)
+        entries = services.store.list_call_entries(case_id)
+        return {
+            "case_id": case_id,
+            "entries": [e.model_dump(mode="json") for e in entries],
+        }
+
+    @app.get("/cases/{case_id}/model-costs")
+    async def case_model_costs(case_id: str):
+        """The case's drafting-cost rollup: totals by purpose and
+        by profile, the budget position, and how many budget
+        refusals the case has recorded."""
+        case_id_var.set(case_id)
+        if services.store.get_case(case_id) is None:
+            raise CaseNotFoundError(case_id)
+        return services.gateway.case_rollup(case_id)
+
+    @app.get("/model-costs/daily")
+    async def model_costs_daily():
+        """The portfolio rollup: every ledgered call grouped by
+        day and profile — calls, tokens, and exact cost."""
+        return {"rows": services.gateway.portfolio_rollup()}
 
     return app
 
