@@ -646,6 +646,85 @@ everything upstream (`reviews.py`):
   investigation record: the tick never fabricates an
   assessment.
 
+## Injection defences + quarantine (R10) — Law 7
+
+The threat is structural, so the defence is too. Untrusted text
+enters the case file from several directions — transaction
+memos and counterparty names (written by customers and their
+banks), alert summaries and payload fields (repeated by the
+monitoring feed), screening subject names and list-entry names
+(the subject's side and the vendor's side), and caller-supplied
+document uploads — and from there it can reach the composers
+(record and narrative drafts), screening and matching inputs,
+and analyst-facing renderings. Law 7's rule: that text is data,
+never instructions, and the system enforces it in code at three
+points — scan, fence, ground.
+
+- **Scan at ingestion.** A deterministic scanner runs a
+  versioned pattern pack (`2026.10.1`: override phrases of the
+  "ignore previous instructions" family including domain-targeted
+  variants, role-play and mode-switch markers, system-prompt
+  markers and token shapes, imperatives aimed at the case
+  workflow — close, dismiss, mark cleared, do-not-file —
+  output dictation, and encoded-payload markers including a
+  base64-blob detector tuned to leave hex digests and IBANs
+  alone) over untrusted text where it lands: alert intake
+  (summary plus every string in the raw payload), transaction
+  ingestion (per-transaction memo and counterparty fields),
+  screening runs (hit subject and entry names), and the
+  evidence funnel itself for every caller-supplied document
+  kind — the kinds the system's own services write are scanned
+  with field precision by their own services or are
+  system-generated, and are exempt at the funnel so nothing is
+  recorded twice. A match never rejects the evidence: the item
+  stands verbatim, and the scan records a **quarantine event**
+  on the case's hash chain naming the item, each field, the
+  pattern matched, and the exact character span (an imperative
+  span runs to the end of its sentence — the whole clause is
+  the payload). Quarantine state is derived from the chain, so
+  R10 adds no tables and no migration.
+- **Fence at consumption.** Wherever untrusted text reaches a
+  composer — the alert summary and screening names in record
+  drafts, the subject name in narrative drafts — the value is
+  passed with each matched span replaced by a fence marker
+  (`[quarantined instruction text removed]`). The payload never
+  reaches a model, a template, or a rendering as bare prose.
+  Matching itself is deterministic code over the raw names and
+  is unaffected; screening still matches a payload-carrying
+  name exactly as it matched a clean one.
+- **Ground against the mask.** The verifiers' cited-token
+  computation — the record gate, the narrative verifier, the
+  review gate, and the composers' allowed sets — tokenises the
+  cited element with quarantined spans masked out, and the
+  narrative verifier's value comparison runs against the
+  fenced form of the evidence, the same form the composer was
+  allowed to see. A figure that appears only inside an
+  instruction span is therefore ungroundable: a finding or
+  statement built on it fails at the gate exactly like an
+  invented figure. Citation rules are unchanged — a citation
+  still resolves to the whole element; the quarantined spans
+  of that element simply contribute no tokens.
+- **Review is an audit act.** The quarantine queue (API:
+  `/queues/quarantine`; per case: `/cases/{id}/quarantine`)
+  lists every record with its item, patterns, spans, and
+  review status. A named analyst may mark a record reviewed —
+  refusing anonymous and system actors, and a second review
+  of the same record. The review is recorded on the chain and
+  changes nothing else: the fences derive from the append-only
+  quarantine record, so review can never un-fence content, and
+  a record composed after a review fences exactly as one
+  composed before it.
+- **Graded, not asserted.** The eval gate (Scenario 13) plants
+  payloads in memos, an alert summary, and a planted-figure
+  memo, and grades zero-tolerance counters: record divergence
+  from the clean run, unfenced summary payloads, injected
+  imperatives in the narrative, payloads without a quarantine
+  event, quarantined spans grounding a figure, state
+  divergence, false positives on ordinary banking prose
+  (including legitimate "transfer instructions" language), and
+  reviews un-fencing content — all zero, with the clean and
+  dirty positive paths landing.
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
@@ -734,7 +813,12 @@ everything, untrusted input quarantined (Law 7).
    continuing-activity clocks started at intake, escalation
    crossings recorded on the chain idempotently, board + queue.
    The review workflow over the continuing clock is R9.
-7. Prompt injection inside evidence is a case event, quarantined — R10.
+7. Prompt injection inside evidence is a case event, quarantined —
+   R10: the versioned pattern pack scans untrusted text at
+   ingestion, matches land on the hash chain as quarantine
+   events with exact spans, composers receive the text only
+   fenced, verifiers ground against the span-masked token set,
+   and an analyst's review is an audit act that never un-fences.
 8. Rubber-stamping is measured (draft-vs-final diff) — R5/R17.
 
 ## Round map (20)

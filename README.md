@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R9 of 20)
+## What is built at this round (R10 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -240,9 +240,38 @@ docker compose up --build
   overdue. One open review stands per cycle; a review whose
   record has moved stands stale and is superseded by a fresh
   one, never edited.
+- **Injection defences + quarantine (R10)** — Law 7 in code.
+  Text that arrives from outside the bank — transaction memos
+  and counterparty names, alert summaries and payload fields,
+  screening subject and list-entry names, uploaded documents —
+  is untrusted by construction, and some of it will eventually
+  be written by someone who knows an AI reads the case file. A
+  deterministic scanner (a versioned pattern pack covering
+  instruction-override phrases, role-play and system-prompt
+  markers, directives aimed at the case workflow, output
+  dictation, and encoded payloads) runs over that text at
+  ingestion. A match never rejects the evidence — evidence is
+  evidence. It records a **quarantine event** on the case's
+  hash chain naming the item, the field, the pattern, and the
+  exact span: the injection attempt becomes a case event an
+  analyst can see. Everywhere the text is consumed, the
+  matched spans are fenced — composers receive the value with
+  each span replaced by a fence marker, never as bare prose a
+  model could follow — and the record, narrative, and review
+  verifiers compute their groundable token set with the spans
+  masked out, so a figure planted inside an instruction
+  grounds nothing however it is cited. The guarantees are
+  graded, not asserted: payloads planted in memos and an
+  alert summary leave the investigation record byte-identical
+  to the clean run and change no case state, and the SAR
+  narrative follows none of the injected imperatives. A named
+  analyst may mark a quarantine record reviewed from the
+  quarantine queue — an audit act recorded on the chain that
+  never un-fences anything; the fences derive from the
+  append-only record itself and are permanent.
 
-The rest of the investigation — injection defences, the
-analyst console — lands in rounds R10–R14 per the round map
+The rest of the investigation — KYC profile assembly, the
+analyst console — lands in rounds R11–R14 per the round map
 in `docs/architecture.md`.
 
 ## Configuration
@@ -263,7 +292,7 @@ in `docs/architecture.md`.
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, API, SQL store
+make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 
@@ -296,7 +325,14 @@ undetected by the clock (0), continuing clocks satisfied
 without a recorded review disposition (0), second concurrent
 reviews accepted (0), reviews with uncited window activity
 accepted (0), no-file cycles without coded rationale
-accepted (0), and broken continuing cycle chains (0).
+accepted (0), broken continuing cycle chains (0), injected
+instructions changing an investigation record (0), alert-summary
+payloads reaching a record unfenced (0), injected imperatives
+followed in a SAR narrative (0), payloads without a quarantine
+event (0), quarantined spans grounding a figure (0), injected
+instructions changing case state (0), quarantine false positives
+on ordinary banking prose (0), and reviews un-fencing
+quarantined content (0).
 
 ## Honest status
 
@@ -309,14 +345,17 @@ accepted (0), and broken continuing cycle chains (0).
   defined behind the model port and not yet exercised — it refuses
   loudly until a key is wired.
 - No SAR is ever actually filed — the blueprint ends at an approved,
-  sealed case file. As of R9 the line stops exactly there: a
+  sealed case file. As of R10 the line stops exactly there: a
   narrative approved under dual control, its case file sealed and
   exportable, the export verifiable offline — every case carrying a
   regulatory clock that says, in code, whether the file is on time,
   due, overdue, satisfied, or documented as a no-file decision —
-  and, for a returning subject, a continuing-activity review per
+  for a returning subject, a continuing-activity review per
   cycle that answers that clock with cited window activity and a
-  named analyst's coded decision.
+  named analyst's coded decision — and every piece of untrusted
+  text on the file scanned at ingestion, with anything that reads
+  as an instruction quarantined on the chain and fenced out of
+  every composer and verifier that touches it.
 - The Docker image builds in CI-grade environments; the compose
   stack is the supported local full-stack path.
 
