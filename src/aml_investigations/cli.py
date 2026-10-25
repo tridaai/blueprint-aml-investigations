@@ -124,6 +124,27 @@ Usage:
                                     of one quarantine record — an
                                     audit act; the content stays
                                     fenced permanently
+    aml-agent profile <customer_id> [--as-of YYYY-MM-DD] [--actor A]
+                                    assemble the customer's KYC
+                                    profile view from stored
+                                    artefacts (R11); unchanged
+                                    inputs return the stored view
+    aml-agent profile-show <customer_id>
+                                    the customer's latest stored
+                                    profile view
+    aml-agent case-profile <case_id>
+                                    the profile view for a case's
+                                    customer
+    aml-agent counterparties <customer_id>
+                                    the customer's counterparties:
+                                    Decimal totals, first/last seen,
+                                    screening state, shared links
+    aml-agent counterparty <customer_id> <name>
+                                    one counterparty's view for one
+                                    customer
+    aml-agent shared-counterparties counterparties standing on more
+                                    than one customer's cases — the
+                                    network view
 """
 
 from __future__ import annotations
@@ -278,6 +299,20 @@ def main(argv: list[str] | None = None) -> int:
     p_q_review.add_argument("quarantine_seq", type=int)
     p_q_review.add_argument("--reviewer", required=True)
     p_q_review.add_argument("--note", default="")
+    p_profile = sub.add_parser("profile")
+    p_profile.add_argument("customer_id")
+    p_profile.add_argument("--as-of", default=None)
+    p_profile.add_argument("--actor", default="kyc-service")
+    p_profile_show = sub.add_parser("profile-show")
+    p_profile_show.add_argument("customer_id")
+    p_case_profile = sub.add_parser("case-profile")
+    p_case_profile.add_argument("case_id")
+    p_counterparties = sub.add_parser("counterparties")
+    p_counterparties.add_argument("customer_id")
+    p_counterparty = sub.add_parser("counterparty")
+    p_counterparty.add_argument("customer_id")
+    p_counterparty.add_argument("name")
+    sub.add_parser("shared-counterparties")
     args = parser.parse_args(argv)
 
     services = build_services()
@@ -780,6 +815,45 @@ def main(argv: list[str] | None = None) -> int:
                 note=args.note,
             )
             print(json.dumps(review.model_dump(mode="json"), indent=2))
+        elif args.command == "profile":
+            from datetime import date
+
+            as_of = (
+                date.fromisoformat(args.as_of)
+                if args.as_of
+                else date.today()
+            )
+            view = services.profiles.assemble_profile(
+                args.customer_id, as_of=as_of, actor=args.actor
+            )
+            print(json.dumps(view.model_dump(mode="json"), indent=2))
+        elif args.command == "profile-show":
+            view = services.profiles.latest_view(args.customer_id)
+            print(json.dumps(view.model_dump(mode="json"), indent=2))
+        elif args.command == "case-profile":
+            view = services.profiles.profile_for_case(args.case_id)
+            print(json.dumps(view.model_dump(mode="json"), indent=2))
+        elif args.command == "counterparties":
+            views = services.profiles.counterparties_for_customer(
+                args.customer_id
+            )
+            print(
+                json.dumps(
+                    [v.model_dump(mode="json") for v in views], indent=2
+                )
+            )
+        elif args.command == "counterparty":
+            view = services.profiles.counterparty_detail(
+                args.customer_id, args.name
+            )
+            print(json.dumps(view.model_dump(mode="json"), indent=2))
+        elif args.command == "shared-counterparties":
+            shared = services.profiles.shared_counterparties()
+            print(
+                json.dumps(
+                    [s.model_dump(mode="json") for s in shared], indent=2
+                )
+            )
     except AmlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

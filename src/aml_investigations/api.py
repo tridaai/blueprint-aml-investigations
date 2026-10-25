@@ -17,9 +17,13 @@ sealing, legal hold and export, and the clock surface (R8): a
 case's regulatory clocks, the clock board, and the clock
 escalation queue, and the quarantine surface (R10): a case's
 quarantine records with their review status, the cross-case
-quarantine queue, and the named-analyst review act. No endpoint
-files a SAR — none exists; the blueprint ends at an approved,
-sealed case file.
+quarantine queue, and the named-analyst review act, and the
+profile surface (R11): assemble a customer's KYC profile view
+from stored artefacts, read it (latest or per case), read its
+version history, and read the counterparty views — per customer,
+one counterparty in detail, and the shared-counterparty network
+view. No endpoint files a SAR — none exists; the blueprint ends
+at an approved, sealed case file.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from .errors import (
     CaseNotFoundError,
     CaseSealedError,
     ContinuingReviewRefusedError,
+    CustomerNotFoundError,
     DispositionRefusedError,
     DispositionRequiredError,
     EvidenceChainError,
@@ -50,6 +55,7 @@ from .errors import (
     InvestigationStateError,
     NarrativeNotFoundError,
     NoTransactionsError,
+    ProfileNotFoundError,
     QuarantineNotFoundError,
     QuarantineRefusedError,
     ReviewNotFoundError,
@@ -273,6 +279,14 @@ class ReviewTickRequest(BaseModel):
     actor: str = Field(default="clock-service", min_length=1)
 
 
+class ProfileAssembleRequest(BaseModel):
+    """Assemble a customer's KYC profile view (R11). ``as_of`` is
+    the date freshness is judged at; omitted means today."""
+
+    as_of: date | None = None
+    actor: str = Field(default="kyc-service", min_length=1)
+
+
 class QuarantineReviewRequest(BaseModel):
     """A named analyst's review of one quarantine record (R10).
     An audit act: it records who looked and what they noted; it
@@ -421,6 +435,18 @@ def create_app(services: Services | None = None) -> FastAPI:
     @app.exception_handler(QuarantineNotFoundError)
     async def _quarantine_not_found(
         _request: Request, exc: QuarantineNotFoundError
+    ):
+        return _error(404, str(exc))
+
+    @app.exception_handler(CustomerNotFoundError)
+    async def _customer_not_found(
+        _request: Request, exc: CustomerNotFoundError
+    ):
+        return _error(404, str(exc))
+
+    @app.exception_handler(ProfileNotFoundError)
+    async def _profile_not_found(
+        _request: Request, exc: ProfileNotFoundError
     ):
         return _error(404, str(exc))
 
@@ -1105,6 +1131,76 @@ def create_app(services: Services | None = None) -> FastAPI:
             note=payload.note,
         )
         return review.model_dump(mode="json")
+
+    # -- profile + counterparty surface (R11) ------------------------
+
+    @app.post("/customers/{customer_id}/profile", status_code=201)
+    async def assemble_profile(
+        customer_id: str, payload: ProfileAssembleRequest
+    ):
+        """Assemble the customer's KYC profile view from stored
+        artefacts. Rebuilding over unchanged inputs returns the
+        stored view; changed inputs append the next version."""
+        view = services.profiles.assemble_profile(
+            customer_id,
+            as_of=payload.as_of or date.today(),
+            actor=payload.actor,
+        )
+        return view.model_dump(mode="json")
+
+    @app.get("/customers/{customer_id}/profile")
+    async def get_profile(customer_id: str):
+        """The customer's latest assembled profile view."""
+        return services.profiles.latest_view(customer_id).model_dump(
+            mode="json"
+        )
+
+    @app.get("/customers/{customer_id}/profile/history")
+    async def profile_history(customer_id: str):
+        """Every stored version of the customer's profile view,
+        oldest first — the assembly history, append-only."""
+        return [
+            v.model_dump(mode="json")
+            for v in services.profiles.view_history(customer_id)
+        ]
+
+    @app.get("/cases/{case_id}/profile")
+    async def case_profile(case_id: str):
+        """The profile view for a case's customer — the read an
+        analyst at the case starts from."""
+        case_id_var.set(case_id)
+        return services.profiles.profile_for_case(case_id).model_dump(
+            mode="json"
+        )
+
+    @app.get("/customers/{customer_id}/counterparties")
+    async def customer_counterparties(customer_id: str):
+        """The customer's counterparties aggregated from stored
+        transactions: Decimal totals, first/last seen, screening
+        state, and the customers each counterparty is shared
+        with."""
+        return [
+            v.model_dump(mode="json")
+            for v in services.profiles.counterparties_for_customer(
+                customer_id
+            )
+        ]
+
+    @app.get("/customers/{customer_id}/counterparties/{name}")
+    async def customer_counterparty(customer_id: str, name: str):
+        """One counterparty's view for one customer."""
+        return services.profiles.counterparty_detail(
+            customer_id, name
+        ).model_dump(mode="json")
+
+    @app.get("/counterparties/shared")
+    async def shared_counterparties():
+        """Counterparties standing on more than one customer's
+        cases — the shared-counterparty network view."""
+        return [
+            s.model_dump(mode="json")
+            for s in services.profiles.shared_counterparties()
+        ]
 
     return app
 
