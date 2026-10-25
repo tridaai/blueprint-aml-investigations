@@ -16,7 +16,8 @@ from .config import Settings, load_settings
 from .evidence import EvidenceService
 from .intake import IntakeService, ReferenceAlertFeed
 from .object_store import LocalObjectStore, S3ObjectStore
-from .ports import AlertSource, CaseStore, ObjectStore
+from .ports import AlertSource, CaseStore, ObjectStore, ScreeningListSource
+from .screening import ReferenceScreeningFeed, ScreeningService
 from .stores import SqlCaseStore
 from .workflow import CaseWorkflow
 
@@ -30,6 +31,8 @@ class Services:
     workflow: CaseWorkflow
     alerts: AlertSource
     intake: IntakeService
+    screening: ScreeningService
+    screening_feed: ScreeningListSource
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -47,9 +50,11 @@ def build_services(settings: Settings | None = None) -> Services:
     else:
         objects = LocalObjectStore(settings.object_store_dir)
     evidence = EvidenceService(store, objects)
-    workflow = CaseWorkflow(store)
+    workflow = CaseWorkflow(store, screening_store=store)
     alerts = ReferenceAlertFeed(settings.seed_alerts_path)
     intake = IntakeService(store, alerts, evidence)
+    screening = ScreeningService(store, store, evidence)
+    screening_feed = ReferenceScreeningFeed(settings.screening_lists_path)
     return Services(
         settings=settings,
         store=store,
@@ -58,4 +63,6 @@ def build_services(settings: Settings | None = None) -> Services:
         workflow=workflow,
         alerts=alerts,
         intake=intake,
+        screening=screening,
+        screening_feed=screening_feed,
     )

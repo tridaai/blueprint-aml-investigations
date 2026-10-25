@@ -53,3 +53,47 @@ class EvidenceChainError(AmlError):
 
 class EvidenceNotFoundError(AmlError):
     """The named evidence item does not exist on the case."""
+
+
+class ScreeningError(AmlError):
+    """Base class for screening (Law 3) refusals."""
+
+
+class SnapshotImmutableError(ScreeningError):
+    """A snapshot with this list kind + version already exists with
+    different content. Snapshots never mutate: a corrected list must
+    be ingested as a new version."""
+
+
+class SnapshotNotFoundError(ScreeningError):
+    """A pin named a list kind + version that has not been ingested."""
+
+
+class ScreeningPinRequiredError(ScreeningError):
+    """A screening run was requested without an explicit pinned
+    snapshot set. Screening against 'whatever is current' is refused:
+    the pin is what makes a result reproducible and auditable."""
+
+
+class HitNotFoundError(ScreeningError):
+    """The named screening hit does not exist."""
+
+
+class SanctionsHitBlocksCloseError(IllegalTransitionError):
+    """A plain close was attempted on a case with an unresolved
+    sanctions hit. The case is in a must-escalate posture: the lawful
+    dispositions are escalate or file_sar, until an analyst clears
+    the hit with a recorded reason."""
+
+    def __init__(self, current: str, hit_ids: list[str]) -> None:
+        self.hit_ids = hit_ids
+        super().__init__(
+            current,
+            "closed",
+            reason=(
+                "unresolved sanctions hit(s) "
+                + ", ".join(hit_ids)
+                + " — disposition must be escalate or file_sar, or an "
+                "analyst must clear the hit with a reason"
+            ),
+        )

@@ -23,6 +23,7 @@ class Settings:
     s3_endpoint_url: str | None
     s3_bucket: str
     seed_alerts_path: Path
+    screening_lists_path: Path
     log_level: str
 
     @property
@@ -64,6 +65,11 @@ def load_settings() -> Settings:
             os.environ.get("SEED_ALERTS_PATH"),
             Path("./data/seed_alerts.json"),
             repo_root / "data" / "seed_alerts.json",
+        ),
+        screening_lists_path=_resolve(
+            os.environ.get("SCREENING_LISTS_PATH"),
+            Path("./data/screening_lists.json"),
+            repo_root / "data" / "screening_lists.json",
         ),
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
     )

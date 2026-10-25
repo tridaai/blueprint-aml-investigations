@@ -10,7 +10,16 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .models import Alert, AuditEvent, Case, EvidenceItem
+from .models import (
+    Alert,
+    AuditEvent,
+    Case,
+    EvidenceItem,
+    ListKind,
+    ListSnapshot,
+    ScreeningHit,
+    ScreeningRun,
+)
 
 
 @runtime_checkable
@@ -65,3 +74,44 @@ class AlertSource(Protocol):
     def get_alert(self, alert_id: str) -> Alert | None: ...
 
     def list_alerts(self) -> list[Alert]: ...
+
+
+@runtime_checkable
+class ScreeningStore(Protocol):
+    """Persistence for list snapshots, screening runs, and hits.
+
+    There is deliberately no update or delete for snapshots: a
+    snapshot, once ingested, is immutable (Law 3). Hits are the one
+    mutable record — an analyst's clear/confirm is a status change
+    with the reason kept on the hit and in the audit log.
+    """
+
+    def save_snapshot(self, snapshot: ListSnapshot) -> ListSnapshot: ...
+
+    def get_snapshot(
+        self, list_kind: ListKind, version: str
+    ) -> ListSnapshot | None: ...
+
+    def list_snapshots(
+        self, list_kind: ListKind | None = None
+    ) -> list[ListSnapshot]: ...
+
+    def add_screening_run(self, run: ScreeningRun) -> ScreeningRun: ...
+
+    def list_screening_runs(self, case_id: str) -> list[ScreeningRun]: ...
+
+    def add_hit(self, hit: ScreeningHit) -> ScreeningHit: ...
+
+    def get_hit(self, hit_id: str) -> ScreeningHit | None: ...
+
+    def list_hits(self, case_id: str) -> list[ScreeningHit]: ...
+
+    def update_hit(self, hit: ScreeningHit) -> ScreeningHit: ...
+
+
+@runtime_checkable
+class ScreeningListSource(Protocol):
+    """Where snapshot definitions come from (a licensed list feed in
+    production; a reference JSON file in the blueprint)."""
+
+    def list_snapshots(self) -> list[ListSnapshot]: ...

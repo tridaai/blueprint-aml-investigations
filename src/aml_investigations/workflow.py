@@ -13,6 +13,12 @@ recorded :class:`~aml_investigations.models.Disposition` whose
 decision matches the target. There is no path — in the graph or
 anywhere else — by which a case closes without a named analyst's
 disposition.
+
+Law 3's consequence lives here too (R2): when a screening store is
+wired, a plain ``closed`` transition is refused for any case with an
+unresolved sanctions hit, whatever the disposition says — the case
+must escalate, file a SAR, or have the hit cleared by an analyst
+with a recorded reason first.
 """
 
 from __future__ import annotations
@@ -26,10 +32,11 @@ from .errors import (
     CaseNotFoundError,
     DispositionRequiredError,
     IllegalTransitionError,
+    SanctionsHitBlocksCloseError,
 )
 from .logging_config import get_logger
-from .models import AuditEvent, Case, CaseStatus, Disposition
-from .ports import CaseStore
+from .models import AuditEvent, Case, CaseStatus, Disposition, HitStatus, ListKind
+from .ports import CaseStore, ScreeningStore
 
 logger = get_logger(__name__)
 
@@ -136,11 +143,49 @@ def build_graph():
 
 
 class CaseWorkflow:
-    """Applies guarded transitions to stored cases via the graph."""
+    """Applies guarded transitions to stored cases via the graph.
 
-    def __init__(self, store: CaseStore) -> None:
+    When a screening store is wired, a second guard sits in front of
+    the graph for the ``closed`` target: a case with an unresolved
+    sanctions hit (Law 3) is in a must-escalate posture and a plain
+    close is refused even with a well-formed disposition — the
+    lawful dispositions are escalate or file_sar, or an analyst
+    clears the hit first with a recorded reason.
+    """
+
+    def __init__(
+        self, store: CaseStore, screening_store: ScreeningStore | None = None
+    ) -> None:
         self._store = store
+        self._screening = screening_store
         self._graph = build_graph()
+
+    def _guard_sanctions_close(self, case: Case, actor: str) -> None:
+        if self._screening is None:
+            return
+        unresolved = [
+            h
+            for h in self._screening.list_hits(case.case_id)
+            if h.list_kind is ListKind.SANCTIONS and h.status is not HitStatus.CLEARED
+        ]
+        if not unresolved:
+            return
+        exc = SanctionsHitBlocksCloseError(
+            case.status.value, [h.hit_id for h in unresolved]
+        )
+        self._store.append_audit(
+            AuditEvent(
+                case_id=case.case_id,
+                actor=actor,
+                event="transition_refused",
+                detail={
+                    "from": case.status.value,
+                    "to": CaseStatus.CLOSED.value,
+                    "reason": str(exc),
+                },
+            )
+        )
+        raise exc
 
     def transition(
         self,
@@ -154,6 +199,8 @@ class CaseWorkflow:
         if case is None:
             raise CaseNotFoundError(case_id)
         current = case.status
+        if target is CaseStatus.CLOSED:
+            self._guard_sanctions_close(case, actor)
         try:
             result = self._graph.invoke(
                 {"case": case, "target": target, "disposition": disposition}

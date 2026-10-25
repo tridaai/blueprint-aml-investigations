@@ -1,8 +1,9 @@
-"""FastAPI surface for the AML investigations blueprint (R1).
+"""FastAPI surface for the AML investigations blueprint.
 
-Endpoints cover the intake -> case -> evidence spine. Investigation
-work (screening, typologies, findings, SAR drafting) arrives in later
-rounds behind the same case/evidence model.
+Endpoints cover the intake -> case -> evidence spine (R1) and the
+screening surface (R2): snapshot ingest, pinned screening runs, hit
+disposition. Investigation work (typologies, findings, SAR drafting)
+arrives in later rounds behind the same case/evidence model.
 """
 
 from __future__ import annotations
@@ -22,7 +23,12 @@ from .errors import (
     DispositionRequiredError,
     EvidenceChainError,
     EvidenceNotFoundError,
+    HitNotFoundError,
     IllegalTransitionError,
+    ScreeningError,
+    ScreeningPinRequiredError,
+    SnapshotImmutableError,
+    SnapshotNotFoundError,
 )
 from .logging_config import (
     case_id_var,
@@ -30,7 +36,14 @@ from .logging_config import (
     get_logger,
     request_id_var,
 )
-from .models import CaseStatus, Disposition
+from .models import (
+    CaseStatus,
+    Disposition,
+    HitStatus,
+    ListKind,
+    ListSnapshot,
+    ScreeningSubject,
+)
 from .wiring import Services, build_services
 
 logger = get_logger(__name__)
@@ -54,6 +67,25 @@ class EvidenceRequest(BaseModel):
     captured_by: str = Field(min_length=1)
     media_type: str = "application/octet-stream"
     legal_hold: bool = False
+
+
+class ScreenRequest(BaseModel):
+    pins: dict[str, str] = Field(
+        description="Pinned snapshot set: list kind -> snapshot version. "
+        "Required — screening without a pin is refused (Law 3)."
+    )
+    actor: str = Field(min_length=1)
+    subjects: list[ScreeningSubject] | None = Field(
+        default=None,
+        description="Explicit subjects; default derives them from the "
+        "case's alert payload evidence.",
+    )
+
+
+class HitStatusRequest(BaseModel):
+    status: HitStatus
+    actor: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -103,6 +135,26 @@ def create_app(services: Services | None = None) -> FastAPI:
     @app.exception_handler(EvidenceChainError)
     async def _chain_error(_request: Request, exc: EvidenceChainError):
         return _error(500, f"evidence chain verification failed: {exc}")
+
+    @app.exception_handler(SnapshotImmutableError)
+    async def _snapshot_immutable(_request: Request, exc: SnapshotImmutableError):
+        return _error(409, str(exc))
+
+    @app.exception_handler(SnapshotNotFoundError)
+    async def _snapshot_not_found(_request: Request, exc: SnapshotNotFoundError):
+        return _error(404, str(exc))
+
+    @app.exception_handler(HitNotFoundError)
+    async def _hit_not_found(_request: Request, exc: HitNotFoundError):
+        return _error(404, f"screening hit not found: {exc}")
+
+    @app.exception_handler(ScreeningPinRequiredError)
+    async def _pin_required(_request: Request, exc: ScreeningPinRequiredError):
+        return _error(422, str(exc))
+
+    @app.exception_handler(ScreeningError)
+    async def _screening_error(_request: Request, exc: ScreeningError):
+        return _error(422, str(exc))
 
     @app.get("/health")
     async def health():
@@ -191,6 +243,74 @@ def create_app(services: Services | None = None) -> FastAPI:
         return [
             e.model_dump(mode="json") for e in services.store.list_audit(case_id)
         ]
+
+    # --- screening (R2, Law 3) --------------------------------------
+    @app.post("/screening/snapshots", status_code=201)
+    async def ingest_snapshot(payload: ListSnapshot):
+        snapshot = services.screening.ingest_snapshot(payload)
+        return snapshot.model_dump(mode="json")
+
+    @app.post("/screening/snapshots/ingest-feed", status_code=201)
+    async def ingest_feed():
+        snapshots = services.screening.ingest_from_source(services.screening_feed)
+        return [s.model_dump(mode="json") for s in snapshots]
+
+    @app.get("/screening/snapshots")
+    async def list_snapshots(kind: ListKind | None = None):
+        return [
+            s.model_dump(mode="json")
+            for s in services.store.list_snapshots(kind)
+        ]
+
+    @app.post("/cases/{case_id}/screening", status_code=201)
+    async def screen_case(case_id: str, payload: ScreenRequest):
+        case_id_var.set(case_id)
+        run = services.screening.screen_case(
+            case_id,
+            payload.pins,
+            actor=payload.actor,
+            subjects=payload.subjects,
+        )
+        hits = [
+            h
+            for h in services.store.list_hits(case_id)
+            if h.run_id == run.run_id
+        ]
+        return {
+            "run": run.model_dump(mode="json"),
+            "hits": [h.model_dump(mode="json") for h in hits],
+        }
+
+    @app.get("/cases/{case_id}/screening")
+    async def get_screening(case_id: str):
+        case = services.store.get_case(case_id)
+        if case is None:
+            raise CaseNotFoundError(case_id)
+        return {
+            "case_id": case_id,
+            "screened_against": [
+                s.model_dump(mode="json") for s in case.screened_against
+            ],
+            "screening_stale": case.screening_stale,
+            "flags": case.flags,
+            "runs": [
+                r.model_dump(mode="json")
+                for r in services.store.list_screening_runs(case_id)
+            ],
+            "hits": [
+                h.model_dump(mode="json") for h in services.store.list_hits(case_id)
+            ],
+        }
+
+    @app.post("/screening/hits/{hit_id}/status")
+    async def set_hit_status(hit_id: str, payload: HitStatusRequest):
+        hit = services.screening.set_hit_status(
+            hit_id,
+            payload.status,
+            actor=payload.actor,
+            reason=payload.reason,
+        )
+        return hit.model_dump(mode="json")
 
     return app
 

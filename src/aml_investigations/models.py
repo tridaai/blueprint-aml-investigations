@@ -52,6 +52,149 @@ class AlertSeverity(str, enum.Enum):
     CRITICAL = "critical"
 
 
+class ListKind(str, enum.Enum):
+    """The screening list families a case is screened against (Law 3)."""
+
+    SANCTIONS = "sanctions"
+    PEP = "pep"
+    ADVERSE_MEDIA = "adverse_media"
+
+
+class ListEntry(BaseModel):
+    """One entry on a screening list snapshot.
+
+    ``dob`` and ``identifiers`` are the disambiguators: a name match
+    alone is a *potential* hit; a name match contradicted by a
+    different date of birth is the classic namesake false positive.
+    """
+
+    entry_id: str
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    dob: date | None = None
+    identifiers: list[str] = Field(
+        default_factory=list,
+        description="Document/registration identifiers, compared normalised.",
+    )
+    note: str = ""
+
+
+class ListSnapshot(BaseModel):
+    """An immutable, versioned snapshot of one screening list (Law 3).
+
+    A snapshot's content can never change after ingest: a corrected
+    list is a NEW snapshot with a new version. ``content_hash`` is
+    computed at ingest over the canonical form of the entries, so any
+    later tampering with the stored payload is detectable.
+    """
+
+    snapshot_id: str = Field(default_factory=lambda: _new_id("snap"))
+    list_kind: ListKind
+    version: str = Field(description="Publisher's version label, e.g. '2026.10.2'.")
+    published_at: datetime
+    source_note: str = Field(description="Where this snapshot came from.")
+    entries: list[ListEntry] = Field(default_factory=list)
+    content_hash: str = Field(
+        default="",
+        description="SHA-256 over the canonical entries; computed at ingest.",
+    )
+
+    @property
+    def entry_count(self) -> int:
+        return len(self.entries)
+
+
+class ScreeningSubject(BaseModel):
+    """A person or entity screened for a case: the customer, a known
+    alias of the customer, or a counterparty found in the evidence."""
+
+    subject_ref: str = Field(description="Case-local reference, e.g. the customer id.")
+    name: str
+    role: str = Field(description="customer | alias | counterparty")
+    aliases: list[str] = Field(default_factory=list)
+    dob: date | None = None
+    identifiers: list[str] = Field(default_factory=list)
+
+
+class ScreenedAgainst(BaseModel):
+    """One line of a case's screening record: which snapshot version
+    of which list the case was last screened against, and by which run."""
+
+    list_kind: ListKind
+    snapshot_id: str
+    version: str
+    run_id: str
+    screened_at: datetime
+
+
+class HitStatus(str, enum.Enum):
+    OPEN = "open"
+    CLEARED = "cleared"
+    CONFIRMED = "confirmed"
+
+
+class ScreeningHit(BaseModel):
+    """One match between a case subject and a list entry.
+
+    A hit is a record, not a verdict. ``status`` moves only by an
+    analyst's recorded action (clear with a reason, or confirm),
+    except for the deterministic namesake clear at match time: name
+    matches but the date of birth contradicts the entry's, which is
+    recorded as a cleared hit with the reason on the record — never
+    silently dropped.
+    """
+
+    hit_id: str = Field(default_factory=lambda: _new_id("hit"))
+    case_id: str
+    run_id: str
+    subject_ref: str
+    subject_name: str
+    subject_role: str
+    list_kind: ListKind
+    snapshot_id: str
+    snapshot_version: str
+    entry_id: str
+    entry_name: str
+    score: float = Field(description="Deterministic name-match score, 0..1.")
+    basis: str = Field(description="Which match rules fired, in words.")
+    strength: str = Field(
+        default="potential",
+        description="potential | strong (identifier or DOB corroboration).",
+    )
+    status: HitStatus = HitStatus.OPEN
+    cleared_reason: str | None = None
+    status_actor: str | None = None
+    status_reason: str | None = None
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ScreeningRun(BaseModel):
+    """One screening of one case against one pinned snapshot set.
+
+    The pin is the point (Law 3): a run names the exact snapshot
+    versions it used, so a case file can always answer "screened
+    against what, when" — and a later run on newer versions sits
+    alongside it in the case's run history, never replacing it.
+    """
+
+    run_id: str = Field(default_factory=lambda: _new_id("run"))
+    case_id: str
+    actor: str
+    run_at: datetime = Field(default_factory=_utcnow)
+    pins: list[ScreenedAgainst] = Field(
+        default_factory=list,
+        description="The pinned snapshot set this run screened against.",
+    )
+    subject_count: int = 0
+    open_hits: int = 0
+    cleared_hits: int = 0
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the screening_result evidence item recording this run.",
+    )
+    is_rescreen: bool = False
+
+
 class Alert(BaseModel):
     """An alert as delivered by the transaction-monitoring system.
 
@@ -111,6 +254,21 @@ class Case(BaseModel):
         description="BSA 5-year retention posture, computed from closure/filing.",
     )
     legal_hold: bool = False
+    screened_against: list[ScreenedAgainst] = Field(
+        default_factory=list,
+        description="Per-list record of the snapshot versions this case was "
+        "last screened against (Law 3). Empty until the first screening run.",
+    )
+    screening_stale: bool = Field(
+        default=False,
+        description="True when a newer snapshot version exists for a list "
+        "this case was screened against and the case has not been re-screened.",
+    )
+    flags: list[str] = Field(
+        default_factory=list,
+        description="Visible case flags maintained by services, e.g. "
+        "STALE_SCREENING, SANCTIONS_HIT. Shown on the case record itself.",
+    )
 
 
 class EvidenceItem(BaseModel):

@@ -17,7 +17,15 @@ import threading
 from pathlib import Path
 
 from .migrations import run_migrations
-from .models import AuditEvent, Case, EvidenceItem
+from .models import (
+    AuditEvent,
+    Case,
+    EvidenceItem,
+    ListKind,
+    ListSnapshot,
+    ScreeningHit,
+    ScreeningRun,
+)
 
 
 class InMemoryCaseStore:
@@ -25,6 +33,9 @@ class InMemoryCaseStore:
         self._cases: dict[str, Case] = {}
         self._evidence: dict[str, list[EvidenceItem]] = {}
         self._audit: list[AuditEvent] = []
+        self._snapshots: dict[tuple[str, str], ListSnapshot] = {}
+        self._runs: list[ScreeningRun] = []
+        self._hits: dict[str, ScreeningHit] = {}
         self._lock = threading.Lock()
 
     def ping(self) -> bool:
@@ -80,6 +91,60 @@ class InMemoryCaseStore:
 
     def list_audit(self, case_id: str) -> list[AuditEvent]:
         return [e.model_copy(deep=True) for e in self._audit if e.case_id == case_id]
+
+    # --- screening (Law 3): snapshots, runs, hits --------------------
+    def save_snapshot(self, snapshot: ListSnapshot) -> ListSnapshot:
+        with self._lock:
+            key = (snapshot.list_kind.value, snapshot.version)
+            if key in self._snapshots:
+                raise KeyError(f"snapshot already exists: {key}")
+            self._snapshots[key] = snapshot.model_copy(deep=True)
+        return snapshot
+
+    def get_snapshot(self, list_kind: ListKind, version: str) -> ListSnapshot | None:
+        snap = self._snapshots.get((list_kind.value, version))
+        return snap.model_copy(deep=True) if snap else None
+
+    def list_snapshots(self, list_kind: ListKind | None = None) -> list[ListSnapshot]:
+        snaps = list(self._snapshots.values())
+        if list_kind is not None:
+            snaps = [s for s in snaps if s.list_kind is list_kind]
+        return [s.model_copy(deep=True) for s in snaps]
+
+    def add_screening_run(self, run: ScreeningRun) -> ScreeningRun:
+        with self._lock:
+            self._runs.append(run.model_copy(deep=True))
+        return run
+
+    def list_screening_runs(self, case_id: str) -> list[ScreeningRun]:
+        return [
+            r.model_copy(deep=True)
+            for r in self._runs
+            if r.case_id == case_id
+        ]
+
+    def add_hit(self, hit: ScreeningHit) -> ScreeningHit:
+        with self._lock:
+            self._hits[hit.hit_id] = hit.model_copy(deep=True)
+        return hit
+
+    def get_hit(self, hit_id: str) -> ScreeningHit | None:
+        hit = self._hits.get(hit_id)
+        return hit.model_copy(deep=True) if hit else None
+
+    def list_hits(self, case_id: str) -> list[ScreeningHit]:
+        return [
+            h.model_copy(deep=True)
+            for h in self._hits.values()
+            if h.case_id == case_id
+        ]
+
+    def update_hit(self, hit: ScreeningHit) -> ScreeningHit:
+        with self._lock:
+            if hit.hit_id not in self._hits:
+                raise KeyError(hit.hit_id)
+            self._hits[hit.hit_id] = hit.model_copy(deep=True)
+        return hit
 
 
 class SqlCaseStore:
@@ -232,3 +297,95 @@ class SqlCaseStore:
             (case_id,),
         )
         return [AuditEvent.model_validate_json(r["payload"]) for r in rows]
+
+    # --- screening (Law 3): snapshots, runs, hits --------------------
+    def save_snapshot(self, snapshot: ListSnapshot) -> ListSnapshot:
+        self._execute(
+            "INSERT INTO list_snapshots (snapshot_id, list_kind, version,"
+            " published_at, content_hash, payload) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                snapshot.snapshot_id,
+                snapshot.list_kind.value,
+                snapshot.version,
+                snapshot.published_at.isoformat(),
+                snapshot.content_hash,
+                snapshot.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return snapshot
+
+    def get_snapshot(self, list_kind: ListKind, version: str) -> ListSnapshot | None:
+        row = self._fetchone(
+            "SELECT payload FROM list_snapshots WHERE list_kind = ? AND version = ?",
+            (list_kind.value, version),
+        )
+        return ListSnapshot.model_validate_json(row["payload"]) if row else None
+
+    def list_snapshots(self, list_kind: ListKind | None = None) -> list[ListSnapshot]:
+        if list_kind is None:
+            rows = self._fetchall(
+                "SELECT payload FROM list_snapshots ORDER BY list_kind, published_at"
+            )
+        else:
+            rows = self._fetchall(
+                "SELECT payload FROM list_snapshots WHERE list_kind = ?"
+                " ORDER BY published_at",
+                (list_kind.value,),
+            )
+        return [ListSnapshot.model_validate_json(r["payload"]) for r in rows]
+
+    def add_screening_run(self, run: ScreeningRun) -> ScreeningRun:
+        self._execute(
+            "INSERT INTO screening_runs (run_id, case_id, run_at, payload)"
+            " VALUES (?, ?, ?, ?)",
+            (run.run_id, run.case_id, run.run_at.isoformat(), run.model_dump_json()),
+        )
+        self._commit()
+        return run
+
+    def list_screening_runs(self, case_id: str) -> list[ScreeningRun]:
+        rows = self._fetchall(
+            "SELECT payload FROM screening_runs WHERE case_id = ?"
+            " ORDER BY run_at ASC, run_id ASC",
+            (case_id,),
+        )
+        return [ScreeningRun.model_validate_json(r["payload"]) for r in rows]
+
+    def add_hit(self, hit: ScreeningHit) -> ScreeningHit:
+        self._execute(
+            "INSERT INTO screening_hits (hit_id, case_id, run_id, list_kind,"
+            " status, payload) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                hit.hit_id,
+                hit.case_id,
+                hit.run_id,
+                hit.list_kind.value,
+                hit.status.value,
+                hit.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return hit
+
+    def get_hit(self, hit_id: str) -> ScreeningHit | None:
+        row = self._fetchone(
+            "SELECT payload FROM screening_hits WHERE hit_id = ?", (hit_id,)
+        )
+        return ScreeningHit.model_validate_json(row["payload"]) if row else None
+
+    def list_hits(self, case_id: str) -> list[ScreeningHit]:
+        rows = self._fetchall(
+            "SELECT payload FROM screening_hits WHERE case_id = ?"
+            " ORDER BY hit_id ASC",
+            (case_id,),
+        )
+        return [ScreeningHit.model_validate_json(r["payload"]) for r in rows]
+
+    def update_hit(self, hit: ScreeningHit) -> ScreeningHit:
+        self._execute(
+            "UPDATE screening_hits SET status = ?, payload = ? WHERE hit_id = ?",
+            (hit.status.value, hit.model_dump_json(), hit.hit_id),
+        )
+        self._commit()
+        return hit
