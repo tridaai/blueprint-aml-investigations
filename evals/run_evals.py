@@ -20,6 +20,13 @@ Zero-tolerance counters:
   - findings without their rule version (R3) ....... must be 0
   - rule-pack mutations accepted (R3) .............. must be 0
   - typology runs over unstored data accepted (R3).. must be 0
+  - investigation citations failing to resolve (R4)  must be 0
+  - unresolvable findings accepted at record time (R4) must be 0
+  - investigation hypotheses incomplete (R4) ....... must be 0
+  - structuring cases missing open questions (R4) ... must be 0
+  - statement figures not tracing to citations (R4). must be 0
+  - investigation re-runs duplicating records (R4).. must be 0
+  - investigation hypotheses wrong on planted cases (R4) must be 0
 
 Exit code 0 iff the gate passes.
 """
@@ -34,14 +41,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from aml_investigations.composer import numeric_tokens, tokens_of  # noqa: E402
 from aml_investigations.errors import (  # noqa: E402
     IllegalTransitionError,
+    InvestigationRefusedError,
     NoTransactionsError,
     RulePackImmutableError,
     ScreeningPinRequiredError,
 )
 from aml_investigations.evidence import EvidenceService  # noqa: E402
-from aml_investigations.intake import IntakeService, ListAlertFeed  # noqa: E402
+from aml_investigations.intake import (  # noqa: E402
+    IntakeService,
+    ListAlertFeed,
+    ReferenceAlertFeed,
+)
+from aml_investigations.investigation import (  # noqa: E402
+    CitationResolver,
+    InvestigationService,
+)
 from aml_investigations.models import (  # noqa: E402
     AccountProfile,
     Alert,
@@ -55,9 +72,16 @@ from aml_investigations.models import (  # noqa: E402
     Transaction,
 )
 from aml_investigations.object_store import LocalObjectStore  # noqa: E402
-from aml_investigations.screening import ScreeningService  # noqa: E402
+from aml_investigations.screening import (  # noqa: E402
+    ReferenceScreeningFeed,
+    ScreeningService,
+)
 from aml_investigations.stores import InMemoryCaseStore  # noqa: E402
-from aml_investigations.transactions import ListTransactionFeed  # noqa: E402
+from aml_investigations.transactions import (  # noqa: E402
+    ListTransactionFeed,
+    ReferenceRulePackFeed,
+    ReferenceTransactionFeed,
+)
 from aml_investigations.typologies import TypologyService  # noqa: E402
 from aml_investigations.workflow import CaseWorkflow  # noqa: E402
 
@@ -197,6 +221,15 @@ def main() -> int:
         "findings_without_rule_version": 0,
         "rule_pack_mutations_accepted": 0,
         "typology_run_without_data_accepted": 0,
+        # R4 investigation counters
+        "investigation_records_built": 0,
+        "investigation_citation_failures": 0,
+        "investigation_unresolvable_accepted": 0,
+        "investigation_hypothesis_incomplete": 0,
+        "investigation_hypothesis_wrong": 0,
+        "investigation_open_questions_missing": 0,
+        "investigation_figure_provenance_failures": 0,
+        "investigation_rerun_duplicated": 0,
     }
 
     store = InMemoryCaseStore()
@@ -593,7 +626,290 @@ def main() -> int:
     except NoTransactionsError:
         pass
 
-    print("Blueprint #15 evals — R1+R2+R3 counters")
+    # -- Scenario 7 (R4): investigation records — citation discipline. ---
+    # Every finding in a built record must cite elements that resolve;
+    # every figure in a statement must trace to a cited record; the
+    # hypothesis must name its support and carry its counter-search;
+    # the structuring case must carry the source-of-funds open
+    # question; a poisoned record must be refused at the gate; a
+    # re-run over unchanged inputs must not duplicate the record,
+    # and new evidence must produce the next version with a diff.
+    investigations = InvestigationService(store, store, store, store, evidence)
+    resolver = CitationResolver(store, evidence)
+
+    def check_record(record, expected_label, *, sof_question: bool) -> None:
+        counters["investigation_records_built"] += 1
+        if record.hypothesis.label != expected_label:
+            counters["investigation_hypothesis_wrong"] += 1
+        by_id = {f.finding_id: f for f in record.findings}
+        for finding in record.findings:
+            if not finding.citations:
+                counters["investigation_citation_failures"] += 1
+                continue
+            cited_tokens = set()
+            for citation in finding.citations:
+                try:
+                    cited_tokens |= tokens_of(
+                        resolver.resolve(citation, record.case_id)
+                    )
+                except Exception:
+                    counters["investigation_citation_failures"] += 1
+            allowed = cited_tokens | set().union(
+                *(numeric_tokens(v) for v in finding.figures.values()), set()
+            )
+            if not numeric_tokens(finding.statement) <= allowed:
+                counters["investigation_figure_provenance_failures"] += 1
+            if finding.origin in (
+                "typology", "screening", "alert", "profile", "prior_case",
+            ):
+                for value in finding.figures.values():
+                    if not numeric_tokens(value) <= cited_tokens:
+                        counters["investigation_figure_provenance_failures"] += 1
+        hypothesis = record.hypothesis
+        support_ok = all(
+            fid in by_id and by_id[fid].direction == "supports"
+            for fid in hypothesis.supporting_finding_ids
+        ) and set(hypothesis.supporting_finding_ids) == {
+            f.finding_id for f in record.findings if f.direction == "supports"
+        } and (
+            expected_label == "no_adverse_pattern"
+            or bool(hypothesis.supporting_finding_ids)
+        )
+        counter_ok = record.counter_search.ran and bool(
+            record.counter_search.checks
+        ) and bool(record.counter_search.coverage)
+        if not (support_ok and counter_ok):
+            counters["investigation_hypothesis_incomplete"] += 1
+        if sof_question and not any(
+            q.evidence_needed == "source_of_funds_documentation"
+            for q in record.open_questions
+        ):
+            counters["investigation_open_questions_missing"] += 1
+
+    def to_investigating(case_id: str) -> None:
+        workflow.transition(case_id, CaseStatus.ASSEMBLING, actor="eval")
+        workflow.transition(case_id, CaseStatus.INVESTIGATING, actor="eval")
+
+    inv_intake = IntakeService(
+        store,
+        ListAlertFeed([
+            Alert(
+                alert_id="EVAL-INV-1", rule_id="TM-STRUCTURING-01",
+                customer_id="CUST-I1", account_id="ACCT-I1",
+                severity="high", detected_on="2026-03-07",
+                summary="Investigation eval: structuring case.",
+                raw={
+                    "customer_name": "Iris Iversen",
+                    "customer_dob": "1980-04-12",
+                    "customer_identifiers": ["PP-SE-1104"],
+                    "counterparties": [],
+                },
+            ),
+            Alert(
+                alert_id="EVAL-INV-3", rule_id="TM-STRUCTURING-01",
+                customer_id="CUST-I3", account_id="ACCT-I3",
+                severity="low", detected_on="2026-03-27",
+                summary="Investigation eval: cadence control.",
+            ),
+        ]),
+        evidence,
+    )
+
+    # INV-1: a planted structuring case, screened (no hits), typed.
+    inv1 = inv_intake.open_case("EVAL-INV-1").case_id
+    workflow.transition(inv1, CaseStatus.ASSEMBLING, actor="eval")
+    screening.screen_case(
+        inv1, {ListKind.SANCTIONS: "2026.10.1"}, actor="eval"
+    )
+    inv1_profile = AccountProfile(
+        account_id="ACCT-I1", customer_id="CUST-I1",
+        opened_on=date(2026, 2, 1), account_type="business_checking",
+        expected_monthly_amount=Decimal("30000"), expected_monthly_count=40,
+    )
+    inv1_stream = [
+        etxn("I1-S1", "ACCT-I1", date(2026, 2, 10), "4200.00", channel="ach"),
+        etxn("I1-1", "ACCT-I1", date(2026, 3, 2), "9500", cash=True, channel="branch"),
+        etxn("I1-2", "ACCT-I1", date(2026, 3, 4), "9600", cash=True, channel="branch"),
+        etxn("I1-3", "ACCT-I1", date(2026, 3, 6), "9700", cash=True, channel="branch"),
+        etxn("I1-S2", "ACCT-I1", date(2026, 3, 10), "4200.00", channel="ach"),
+    ]
+    typologies.ingest_from_source(
+        inv1, ListTransactionFeed([inv1_profile], {"ACCT-I1": inv1_stream}),
+        actor="eval-feed",
+    )
+    typologies.run_typologies(inv1, "eval-pack", "1.0", actor="eval-runner")
+    workflow.transition(inv1, CaseStatus.INVESTIGATING, actor="eval")
+    record_v1 = investigations.run_investigation(inv1, actor="eval-analyst")
+    check_record(record_v1, "structuring", sof_question=True)
+
+    # The gate refuses poisoned records: a citation to a real item
+    # naming an element that is not inside it, a citation to a
+    # missing item, and an added finding with no citations.
+    typo_finding = next(
+        f for f in record_v1.findings if f.origin == "typology"
+    )
+    for poison in (
+        typo_finding.model_copy(update={
+            "citations": [typo_finding.citations[0].model_copy(
+                update={"element": "finding:find-does-not-exist"})],
+        }),
+        typo_finding.model_copy(update={
+            "citations": [typo_finding.citations[0].model_copy(
+                update={"evidence_seq": 999})],
+        }),
+        typo_finding.model_copy(update={"citations": []}),
+    ):
+        poisoned = record_v1.model_copy(update={
+            "findings": [
+                poison if f.finding_id == typo_finding.finding_id else f
+                for f in record_v1.findings
+            ],
+        })
+        try:
+            investigations.verify_record(poisoned)
+            counters["investigation_unresolvable_accepted"] += 1
+        except InvestigationRefusedError:
+            pass
+
+    # A re-run over unchanged inputs returns the same record.
+    again = investigations.run_investigation(inv1, actor="eval-analyst")
+    if again.record_id != record_v1.record_id or again.version != 1:
+        counters["investigation_rerun_duplicated"] += 1
+
+    # New evidence (a round-amount stream) + a fresh typology run
+    # produce version 2, superseding v1, with the new pattern in the
+    # diff and v1 still on the chain.
+    extra = [
+        etxn(f"I1-R{i}", "ACCT-I1", date(2026, 3, 12) + timedelta(days=i),
+             "10000", channel="wire")
+        for i in range(8)
+    ]
+    typologies.ingest_transactions(
+        inv1, extra, source_ref="core-banking:ACCT-I1:delta", actor="eval-feed"
+    )
+    typologies.run_typologies(inv1, "eval-pack", "1.0", actor="eval-runner")
+    record_v2 = investigations.run_investigation(inv1, actor="eval-analyst")
+    if (
+        record_v2.version != 2
+        or record_v2.supersedes_record_id != record_v1.record_id
+        or record_v2.diff is None
+        or record_v2.diff.from_version != 1
+        or not any(
+            k.startswith("typology:round_amount")
+            for k in record_v2.diff.added
+        )
+        or len(investigations.record_history(inv1)) != 2
+    ):
+        counters["investigation_rerun_duplicated"] += 1
+    check_record(record_v2, "structuring", sof_question=True)
+    try:
+        evidence.verify_chain(inv1)
+    except Exception:
+        counters["chains_failed"] += 1
+
+    # INV-3: the cadence control — no typology fires, the record's
+    # hypothesis is the benign one, and its citations still resolve.
+    inv3 = inv_intake.open_case("EVAL-INV-3").case_id
+    inv3_stream = []
+    day = date(2026, 1, 5)
+    for i in range(9):
+        inv3_stream.append(
+            etxn(f"I3-{i}", "ACCT-I3", day, "9500", cash=True, channel="branch")
+        )
+        day += timedelta(days=10)
+    inv3_profile = AccountProfile(
+        account_id="ACCT-I3", customer_id="CUST-I3",
+        opened_on=date(2025, 12, 1), account_type="business_checking",
+    )
+    typologies.ingest_from_source(
+        inv3, ListTransactionFeed([inv3_profile], {"ACCT-I3": inv3_stream}),
+        actor="eval-feed",
+    )
+    typologies.run_typologies(inv3, "eval-pack", "1.0", actor="eval-runner")
+    to_investigating(inv3)
+    record_inv3 = investigations.run_investigation(inv3, actor="eval-analyst")
+    check_record(record_inv3, "no_adverse_pattern", sof_question=False)
+
+    # The shipped seed structuring case, end to end over the repo's
+    # own data files (screening + typologies + investigation). It
+    # runs on its own stack: the shipped snapshots carry the same
+    # version strings as the eval fixtures above with different
+    # content, and snapshots are immutable once ingested.
+    data_dir = Path(__file__).resolve().parents[1] / "data"
+    s_store = InMemoryCaseStore()
+    s_evidence = EvidenceService(
+        s_store, LocalObjectStore(Path(tempfile.mkdtemp(prefix="aml-evals-seed-")))
+    )
+    s_workflow = CaseWorkflow(s_store, screening_store=s_store)
+    s_screening = ScreeningService(s_store, s_store, s_evidence)
+    s_typologies = TypologyService(s_store, s_store, s_evidence)
+    s_investigations = InvestigationService(
+        s_store, s_store, s_store, s_store, s_evidence
+    )
+    s_intake = IntakeService(
+        s_store, ReferenceAlertFeed(data_dir / "seed_alerts.json"), s_evidence
+    )
+    s_screening.ingest_from_source(
+        ReferenceScreeningFeed(data_dir / "screening_lists.json")
+    )
+    s_typologies.register_from_source(
+        ReferenceRulePackFeed(data_dir / "typology_rules.json")
+    )
+    shipped = s_intake.open_case("ALRT-2026-1001").case_id
+    s_workflow.transition(shipped, CaseStatus.ASSEMBLING, actor="eval")
+    s_screening.screen_case(
+        shipped,
+        {
+            ListKind.SANCTIONS: "2026.10.1",
+            ListKind.PEP: "2026.10.1",
+            ListKind.ADVERSE_MEDIA: "2026.10.1",
+        },
+        actor="eval",
+    )
+    s_typologies.ingest_from_source(
+        shipped,
+        ReferenceTransactionFeed(data_dir / "transaction_streams.json"),
+        actor="eval-feed",
+    )
+    s_typologies.run_typologies(
+        shipped, "harborline-typologies", "2026.10.1", actor="eval-runner"
+    )
+    s_workflow.transition(shipped, CaseStatus.INVESTIGATING, actor="eval")
+    shipped_record = s_investigations.run_investigation(
+        shipped, actor="eval-analyst"
+    )
+    # Citation/provenance checks for this record run against its own
+    # stack's resolver.
+    seed_resolver = CitationResolver(s_store, s_evidence)
+    counters["investigation_records_built"] += 1
+    if shipped_record.hypothesis.label != "structuring":
+        counters["investigation_hypothesis_wrong"] += 1
+    for finding in shipped_record.findings:
+        cited_tokens = set()
+        for citation in finding.citations:
+            try:
+                cited_tokens |= tokens_of(
+                    seed_resolver.resolve(citation, shipped_record.case_id)
+                )
+            except Exception:
+                counters["investigation_citation_failures"] += 1
+        allowed = cited_tokens | set().union(
+            *(numeric_tokens(v) for v in finding.figures.values()), set()
+        )
+        if not numeric_tokens(finding.statement) <= allowed:
+            counters["investigation_figure_provenance_failures"] += 1
+    if not any(
+        q.evidence_needed == "source_of_funds_documentation"
+        for q in shipped_record.open_questions
+    ):
+        counters["investigation_open_questions_missing"] += 1
+    if not (
+        shipped_record.counter_search.ran
+        and shipped_record.counter_search.checks
+    ):
+        counters["investigation_hypothesis_incomplete"] += 1
+
+    print("Blueprint #15 evals — R1+R2+R3+R4 counters")
     for key, value in counters.items():
         print(f"  {key}: {value}")
     zero_tolerance = [
@@ -613,6 +929,13 @@ def main() -> int:
         "findings_without_rule_version",
         "rule_pack_mutations_accepted",
         "typology_run_without_data_accepted",
+        "investigation_citation_failures",
+        "investigation_unresolvable_accepted",
+        "investigation_hypothesis_incomplete",
+        "investigation_hypothesis_wrong",
+        "investigation_open_questions_missing",
+        "investigation_figure_provenance_failures",
+        "investigation_rerun_duplicated",
     ]
     passed = all(counters[k] == 0 for k in zero_tolerance) and counters["cases_opened"] == len(ALERTS)
     print("GATE: PASS" if passed else "GATE: FAIL")
