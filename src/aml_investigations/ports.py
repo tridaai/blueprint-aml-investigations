@@ -17,6 +17,8 @@ from .models import (
     Case,
     CaseSeal,
     CaseUnseal,
+    ContinuingReview,
+    ContinuingReviewDisposition,
     DispositionConfirmation,
     DispositionRecord,
     EvidenceItem,
@@ -335,3 +337,43 @@ class SealStore(Protocol):
     def add_hold_event(self, event: LegalHoldEvent) -> LegalHoldEvent: ...
 
     def list_hold_events(self, case_id: str) -> list[LegalHoldEvent]: ...
+
+
+@runtime_checkable
+class ContinuingReviewStore(Protocol):
+    """Persistence for continuing-activity reviews and their
+    dispositions (R9).
+
+    Both artefacts are append-only: a review is never edited or
+    deleted once assembled (a superseded record earns a fresh
+    review, recorded in its place by ``supersedes_review_id``),
+    and a review's disposition is recorded exactly once. The
+    clock service reads the same rows to learn a cycle's outcome
+    — the disposition row, and nothing else, answers the clock.
+    """
+
+    def add_review(self, review: ContinuingReview) -> ContinuingReview: ...
+
+    def get_review(self, review_id: str) -> ContinuingReview | None: ...
+
+    def list_reviews(self, case_id: str) -> list[ContinuingReview]: ...
+
+    def list_reviews_for_customer(
+        self, customer_id: str
+    ) -> list[ContinuingReview]: ...
+
+    def add_review_disposition(
+        self, disposition: ContinuingReviewDisposition
+    ) -> ContinuingReviewDisposition: ...
+
+    def get_review_disposition_for(
+        self, review_id: str
+    ) -> ContinuingReviewDisposition | None: ...
+
+    def list_review_dispositions(
+        self, case_id: str
+    ) -> list[ContinuingReviewDisposition]: ...
+
+    def list_review_dispositions_for_customer(
+        self, customer_id: str
+    ) -> list[ContinuingReviewDisposition]: ...

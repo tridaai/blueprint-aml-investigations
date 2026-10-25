@@ -277,3 +277,28 @@ class SanctionsHitBlocksCloseError(IllegalTransitionError):
                 "analyst must clear the hit with a reason"
             ),
         )
+
+
+class ContinuingReviewError(AmlError):
+    """Base class for R9 continuing-activity review failures."""
+
+
+class ContinuingReviewRefusedError(ContinuingReviewError):
+    """The review action was refused, with a machine-readable
+    reason: no_continuing_clock, prior_record_missing,
+    no_investigation_record, review_already_open,
+    cycle_already_answered, actor_required,
+    review_citations_unresolvable, review_stale,
+    review_superseded, already_dispositioned,
+    anonymous_or_system_actor, unknown_role,
+    rationale_codes_required, unknown_rationale_code,
+    case_not_awaiting_analyst, record_citation_not_current.
+    The refusal is audited before it is raised."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class ReviewNotFoundError(ContinuingReviewError):
+    """The named review does not exist on this case."""

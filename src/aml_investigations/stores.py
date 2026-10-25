@@ -23,6 +23,8 @@ from .models import (
     Case,
     CaseSeal,
     CaseUnseal,
+    ContinuingReview,
+    ContinuingReviewDisposition,
     DispositionConfirmation,
     DispositionRecord,
     EvidenceItem,
@@ -66,6 +68,8 @@ class InMemoryCaseStore:
         self._seals: list[CaseSeal] = []
         self._unseals: list[CaseUnseal] = []
         self._hold_events: list[LegalHoldEvent] = []
+        self._reviews: list[ContinuingReview] = []
+        self._review_dispositions: list[ContinuingReviewDisposition] = []
         self._lock = threading.Lock()
 
     def ping(self) -> bool:
@@ -469,6 +473,80 @@ class InMemoryCaseStore:
         return [
             e.model_copy(deep=True)
             for e in sorted(events, key=lambda e: (e.recorded_at, e.hold_event_id))
+        ]
+
+    # -- continuing-activity reviews (R9): append-only ---------
+
+    def add_review(self, review: ContinuingReview) -> ContinuingReview:
+        with self._lock:
+            self._reviews.append(review.model_copy(deep=True))
+        return review
+
+    def get_review(self, review_id: str) -> ContinuingReview | None:
+        for review in self._reviews:
+            if review.review_id == review_id:
+                return review.model_copy(deep=True)
+        return None
+
+    def list_reviews(self, case_id: str) -> list[ContinuingReview]:
+        reviews = [r for r in self._reviews if r.case_id == case_id]
+        return [
+            r.model_copy(deep=True)
+            for r in sorted(reviews, key=lambda r: (r.opened_at, r.review_id))
+        ]
+
+    def list_reviews_for_customer(
+        self, customer_id: str
+    ) -> list[ContinuingReview]:
+        reviews = [r for r in self._reviews if r.customer_id == customer_id]
+        return [
+            r.model_copy(deep=True)
+            for r in sorted(reviews, key=lambda r: (r.opened_at, r.review_id))
+        ]
+
+    def add_review_disposition(
+        self, disposition: ContinuingReviewDisposition
+    ) -> ContinuingReviewDisposition:
+        with self._lock:
+            self._review_dispositions.append(disposition.model_copy(deep=True))
+        return disposition
+
+    def get_review_disposition_for(
+        self, review_id: str
+    ) -> ContinuingReviewDisposition | None:
+        for disposition in self._review_dispositions:
+            if disposition.review_id == review_id:
+                return disposition.model_copy(deep=True)
+        return None
+
+    def list_review_dispositions(
+        self, case_id: str
+    ) -> list[ContinuingReviewDisposition]:
+        dispositions = [
+            d for d in self._review_dispositions if d.case_id == case_id
+        ]
+        return [
+            d.model_copy(deep=True)
+            for d in sorted(
+                dispositions,
+                key=lambda d: (d.decided_at, d.review_disposition_id),
+            )
+        ]
+
+    def list_review_dispositions_for_customer(
+        self, customer_id: str
+    ) -> list[ContinuingReviewDisposition]:
+        dispositions = [
+            d
+            for d in self._review_dispositions
+            if d.customer_id == customer_id
+        ]
+        return [
+            d.model_copy(deep=True)
+            for d in sorted(
+                dispositions,
+                key=lambda d: (d.decided_at, d.review_disposition_id),
+            )
         ]
 
 
@@ -1187,4 +1265,117 @@ class SqlCaseStore:
         )
         return [
             LegalHoldEvent.model_validate_json(r["payload"]) for r in rows
+        ]
+
+    # -- continuing-activity reviews (R9): append-only ---------
+
+    def add_review(self, review: ContinuingReview) -> ContinuingReview:
+        self._execute(
+            "INSERT INTO continuing_reviews (review_id, case_id,"
+            " customer_id, cycle, opened_at, payload)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                review.review_id,
+                review.case_id,
+                review.customer_id,
+                review.cycle,
+                review.opened_at.isoformat(),
+                review.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return review
+
+    def get_review(self, review_id: str) -> ContinuingReview | None:
+        row = self._fetchone(
+            "SELECT payload FROM continuing_reviews WHERE review_id = ?",
+            (review_id,),
+        )
+        if row is None:
+            return None
+        return ContinuingReview.model_validate_json(row["payload"])
+
+    def list_reviews(self, case_id: str) -> list[ContinuingReview]:
+        rows = self._fetchall(
+            "SELECT payload FROM continuing_reviews WHERE case_id = ?"
+            " ORDER BY opened_at ASC, review_id ASC",
+            (case_id,),
+        )
+        return [
+            ContinuingReview.model_validate_json(r["payload"]) for r in rows
+        ]
+
+    def list_reviews_for_customer(
+        self, customer_id: str
+    ) -> list[ContinuingReview]:
+        rows = self._fetchall(
+            "SELECT payload FROM continuing_reviews"
+            " WHERE customer_id = ?"
+            " ORDER BY opened_at ASC, review_id ASC",
+            (customer_id,),
+        )
+        return [
+            ContinuingReview.model_validate_json(r["payload"]) for r in rows
+        ]
+
+    def add_review_disposition(
+        self, disposition: ContinuingReviewDisposition
+    ) -> ContinuingReviewDisposition:
+        self._execute(
+            "INSERT INTO continuing_review_dispositions"
+            " (review_disposition_id, review_id, case_id,"
+            " customer_id, decided_at, payload)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                disposition.review_disposition_id,
+                disposition.review_id,
+                disposition.case_id,
+                disposition.customer_id,
+                disposition.decided_at.isoformat(),
+                disposition.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return disposition
+
+    def get_review_disposition_for(
+        self, review_id: str
+    ) -> ContinuingReviewDisposition | None:
+        row = self._fetchone(
+            "SELECT payload FROM continuing_review_dispositions"
+            " WHERE review_id = ?",
+            (review_id,),
+        )
+        if row is None:
+            return None
+        return ContinuingReviewDisposition.model_validate_json(
+            row["payload"]
+        )
+
+    def list_review_dispositions(
+        self, case_id: str
+    ) -> list[ContinuingReviewDisposition]:
+        rows = self._fetchall(
+            "SELECT payload FROM continuing_review_dispositions"
+            " WHERE case_id = ?"
+            " ORDER BY decided_at ASC, review_disposition_id ASC",
+            (case_id,),
+        )
+        return [
+            ContinuingReviewDisposition.model_validate_json(r["payload"])
+            for r in rows
+        ]
+
+    def list_review_dispositions_for_customer(
+        self, customer_id: str
+    ) -> list[ContinuingReviewDisposition]:
+        rows = self._fetchall(
+            "SELECT payload FROM continuing_review_dispositions"
+            " WHERE customer_id = ?"
+            " ORDER BY decided_at ASC, review_disposition_id ASC",
+            (customer_id,),
+        )
+        return [
+            ContinuingReviewDisposition.model_validate_json(r["payload"])
+            for r in rows
         ]

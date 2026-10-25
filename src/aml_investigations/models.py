@@ -1388,6 +1388,31 @@ class ContinuingActivityClock(BaseModel):
         description="Seq of the continuing_activity_link evidence "
         "item that started this clock.",
     )
+    cycle: int = Field(
+        default=1,
+        description="R9: which continuing-activity cycle this "
+        "clock is for. Cycle 1 derives from the link; a no-file "
+        "review disposition starts the next cycle from its own "
+        "determination date (rolling 90/120).",
+    )
+    prior_review_id: str | None = Field(
+        default=None,
+        description="R9: the review whose no-file decision "
+        "started this cycle — the explicit cycle chain. None on "
+        "cycle 1.",
+    )
+    answered_by_review_id: str | None = Field(
+        default=None,
+        description="R9: the review whose recorded disposition "
+        "answered this cycle's clock, when one did. A review "
+        "opened but not dispositioned never appears here — it "
+        "does not satisfy the clock.",
+    )
+    answered_outcome: str | None = Field(
+        default=None,
+        description="R9: the answering review disposition's "
+        "outcome (a ReviewOutcome value), when one answered.",
+    )
 
 
 class ClockEscalationEvent(BaseModel):
@@ -1436,6 +1461,13 @@ class CaseClocks(BaseModel):
     as_of: date
     filing: FilingClock
     continuing_activity: ContinuingActivityClock | None = None
+    continuing_history: list[ContinuingActivityClock] = Field(
+        default_factory=list,
+        description="R9: every continuing-activity cycle's clock, "
+        "oldest first — the answered cycles with the review that "
+        "answered them, and the live cycle last. Empty when no "
+        "continuing clock was started.",
+    )
     escalations: list[ClockEscalationEvent] = Field(default_factory=list)
     violations: list[str] = Field(default_factory=list)
 
@@ -1458,6 +1490,148 @@ class EscalationQueueEntry(BaseModel):
         description="The named deadline and the time to it, in "
         "words — the reason this entry stands in the queue."
     )
+
+
+# ------------------------------------------------------------------
+# Continuing-activity reviews (R9) — the workflow answering R8's
+# continuing-activity clock. When a subject returns after a prior
+# SAR filing, the BSA posture asks one question per cycle: has the
+# activity continued, and is a continuing SAR being filed? R8
+# started the clock (review due at determination + 90, filing due
+# at + 120); R9 records the review that answers it. One
+# ContinuingReview is assembled per cycle — window activity, each
+# item cited under the R4 citation discipline, a coded assessment
+# of whether the window activity continues the filed typology,
+# open questions — and one ContinuingReviewDisposition, a named
+# analyst's recorded decision, is the ONLY thing that answers the
+# clock for that cycle. A no-file decision ends the cycle and
+# starts the next cycle's clock from its own determination date
+# (rolling 90/120), chained explicitly by review id.
+
+
+class ReviewOutcome(str, enum.Enum):
+    """The cycle's decision: a continuing filing is due (the
+    linked case is routed to the R6 narrative path), or no filing
+    this cycle (documented on the clock by coded rationale)."""
+
+    FILE_CONTINUING = "file_continuing"
+    NO_FILE_THIS_CYCLE = "no_file_this_cycle"
+
+
+class ReviewActivityItem(BaseModel):
+    """One gathered piece of window activity, cited.
+
+    ``statement`` is assembled from cited evidence text only;
+    ``citations`` resolve under the case's own CitationResolver —
+    no new resolver exists for this round. ``refs`` carries the
+    machine references (case and alert ids the statement speaks
+    of) as data, so the statement itself never has to name an
+    identifier its citations cannot ground.
+    """
+
+    kind: str = Field(
+        description="prior_filing | window_alert | "
+        "window_transactions | record_hypothesis | "
+        "typology_finding | screening_state"
+    )
+    statement: str
+    citations: list[Citation] = Field(min_length=1)
+    figures: dict[str, str] = Field(default_factory=dict)
+    refs: dict[str, str] = Field(default_factory=dict)
+
+
+class ContinuingReview(BaseModel):
+    """One cycle's review artefact. Immutable once assembled: it
+    cites the linked case's investigation record by id and version,
+    and if that record is superseded the review stands stale — a
+    fresh review is opened in its place (``supersedes_review_id``),
+    never an edit. ``prior_review_id`` chains the cycles: cycle
+    N's review names cycle N−1's dispositioned review, whose
+    no-file determination started this cycle's clock."""
+
+    review_id: str = Field(default_factory=lambda: _new_id("crev"))
+    case_id: str
+    customer_id: str
+    prior_case_id: str
+    cycle: int = Field(ge=1)
+    prior_review_id: str | None = None
+    supersedes_review_id: str | None = None
+    determination_on: date = Field(
+        description="The determination that started this cycle: "
+        "for cycle 1, the prior case's SAR determination; for "
+        "later cycles, the prior cycle's no-file decision date."
+    )
+    review_due_on: date = Field(description="determination + 90 days")
+    filing_due_on: date = Field(description="determination + 120 days")
+    record_id: str = Field(
+        description="The linked case's investigation record the "
+        "review is assembled over, cited exactly."
+    )
+    record_version: int
+    filed_typology_label: str = Field(
+        description="The hypothesis label the prior case filed "
+        "on — the typology continuation is assessed against."
+    )
+    prior_narrative_id: str | None = Field(
+        default=None,
+        description="The prior case's completed narrative, "
+        "cited by the review's prior-filing item.",
+    )
+    activity: list[ReviewActivityItem] = Field(default_factory=list)
+    continuation_assessment: str = Field(
+        description="Coded, derived in code from the filed "
+        "typology and the current record's hypothesis and "
+        "findings: continues_filed_typology | "
+        "new_pattern_in_window | no_adverse_activity_in_window | "
+        "activity_unrelated_to_filing"
+    )
+    assessment_basis: str = Field(
+        description="How the coded assessment was derived, in "
+        "words — never a free-text substitute for the code."
+    )
+    open_questions: list[OpenQuestion] = Field(default_factory=list)
+    opened_by: str = Field(
+        description="The named analyst who opened the review, "
+        "or the scheduler tick's actor — recorded either way."
+    )
+    opened_at: datetime
+    evidence_seq: int | None = None
+
+
+class ContinuingReviewDisposition(BaseModel):
+    """A named analyst's recorded decision for one cycle.
+
+    Append-only, like every decision artefact in this system: the
+    decision is never edited, and a dispositioned review is
+    immutable. For a file-continuing decision,
+    ``case_disposition_id`` names the escalate_sar case
+    disposition the decision minted through the R5 gate — the
+    routing into the R6 narrative path — and
+    ``rationale_codes`` are drawn from that gate's escalate_sar
+    vocabulary. For a no-file decision the codes are drawn from
+    the review vocabulary family, and they are the cycle's
+    documentation on the clock.
+    """
+
+    review_disposition_id: str = Field(
+        default_factory=lambda: _new_id("crevd")
+    )
+    review_id: str
+    case_id: str
+    customer_id: str
+    analyst_id: str
+    analyst_role: str
+    outcome: ReviewOutcome
+    rationale_codes: list[str] = Field(min_length=1)
+    rationale_vocabulary_version: str
+    note: str = ""
+    case_disposition_id: str | None = Field(
+        default=None,
+        description="file_continuing only: the escalate_sar case "
+        "disposition minted through the disposition gate.",
+    )
+    decided_at: datetime
+    evidence_seq: int | None = None
 
 
 class ExportVerification(BaseModel):
