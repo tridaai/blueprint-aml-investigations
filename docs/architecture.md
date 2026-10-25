@@ -268,11 +268,13 @@ transactions or records it computed from.
 The default `offline` profile is a deterministic stand-in composer:
 it renders statements from values code computed out of the cited
 records, and *refuses* a statement whose figures are not all in its
-inputs. The live `hosted-frontier` profile's interface is defined
-behind the same port and, until a deployment wires a key, selecting
-it is a loud refusal — never a silent fall-back to offline text
-under a live profile's name. The record names the profile that
-produced its text. The full gateway (routing, cost ledger) is R13.
+inputs. The live profiles sit behind the same port; until a
+deployment wires a key, selecting one is a loud refusal — never a
+silent fall-back to offline text under a live profile's name. The
+record names the profile that produced its text. R13 built the
+full gateway behind the port — profiles as governed data,
+real adapters, the per-case budget, and the cost ledger (see
+the gateway section below).
 
 **The record gate is mechanical.** Before anything persists, the
 verify node re-resolves every citation from the store, checks that
@@ -882,6 +884,97 @@ the positive paths (six articles ingested as evidence, six
 assessments recorded with versions pinned, six cited findings
 in the next record version) landing.
 
+## Model gateway + cost ledger (R13)
+
+R4/R6 put composition behind a port with named profiles; R13
+builds the gateway those profiles live behind (`gateway.py`) —
+the one configured path for drafting calls, under the same
+disciplines as every other subsystem: configuration as governed
+data, refusals that are loud and recorded, and nothing priced
+by implication.
+
+- **Profiles are data, loaded fail-closed.** A profile
+  definition names an id, a provider kind, a model, and the
+  *environment variables* holding its endpoint and key — never
+  the values. Three ship: `offline` (the deterministic
+  composer), `hosted-frontier` (Anthropic Messages API), and
+  `in-boundary` (an open-weight model on an OpenAI-compatible
+  endpoint inside the bank's boundary). The loader refuses the
+  whole configuration over any defect: duplicate ids, a live
+  profile with no endpoint, a key-required profile naming no
+  key variable, a model with no price-table entry, a duplicate
+  or negative price, a malformed budget cap. Wiring validates
+  the deployment's own profile (`AML_MODEL_PROFILE`) at
+  startup. At call time, an unknown profile raises
+  `UnknownModelProfileError` and an unconfigured live profile
+  raises `ModelProfileNotConfiguredError` — the R6 stub's loud
+  refusal, now issued by the gateway that owns the configured
+  path. There is no fallback in the module: no code path
+  substitutes one profile for another, at load, at wiring, or
+  mid-case.
+- **Adapters are real HTTP clients.** One per provider kind,
+  over httpx, exercised in tests and evals against stub
+  transports returning provider-shaped responses. Each returns
+  the composed text plus token counts — the provider's reported
+  usage when sent, else the adapter's estimate, recorded with
+  its basis (`estimated:chars/4`) so an estimate is never
+  mistaken for a measurement. The gateway applies the
+  composer's figure gate to the returned text exactly as it
+  does to offline text: an ungrounded figure refuses the
+  statement, whoever wrote it — and the call is ledgered
+  first, because a refused statement still cost what it cost.
+- **Every call is priced into an append-only ledger**
+  (migration 0011: `model_call_ledger`, `model_budget_events`).
+  An entry carries the case (or the system scope), the purpose
+  (`record_draft`, `sar_draft`), profile and model, tokens and
+  their basis, the price-table version *and the unit prices
+  applied*, latency, and a timestamp from the gateway's
+  injected clock — so the cost re-computes from the entry
+  alone, and a later price-table version never reprices a
+  recorded call. Offline calls ledger at zero: the ledger is
+  the complete record of drafting cost, not just the paid part.
+  Money is Decimal end to end; the price table
+  (`data/model_prices.json`) is governed reference data with a
+  version, an as-of date, and a stated basis per model.
+- **The per-case budget is enforced before transport.** The
+  cap is configuration (`case_budget_usd` in the profiles
+  data). Before a live call for a case, the gateway sums the
+  case's ledgered spend; at or over the cap, the call is
+  refused with `ModelBudgetExceededError` — the stub
+  transport's call count in the evals proves the refused call
+  never reaches the endpoint. The refusal is recorded three
+  ways: a budget event in the ledger store, an audit event on
+  the case, and an item on the case's hash chain (kind
+  `model_budget_refusal`, a system kind the quarantine funnel
+  does not rescan). The offline profile is never capped, and
+  finishing a case offline after a refusal is a normal path —
+  taken by the caller naming `offline`, never by the gateway
+  switching on its own. API keys live only in the gateway's
+  in-memory resolution: profile summaries expose variable
+  names and a `configured` flag, never values.
+- **Rollups are reads over the ledger**: per case (totals by
+  purpose and by profile, tokens, the budget position and
+  refusal count) and per day × profile across the portfolio —
+  exposed on the API (`/model/profiles`,
+  `/cases/{id}/model-ledger`, `/cases/{id}/model-costs`,
+  `/model-costs/daily`) and the CLI (`model-profiles`,
+  `case-costs`, `case-ledger`, `portfolio-costs`). No verdict
+  anywhere derives from ledger data; it is cost accounting,
+  kept separate from the case's evidence and clocks.
+
+Graded by eval Scenario 16: an offline investigation + SAR
+draft ledger exactly one entry per composed statement, all at
+zero and all recomputing from their tokens and prices; a
+stubbed hosted-frontier draft prices every statement at the
+hand-computed fixture cost; unknown/unconfigured profiles, an
+unpriced model in the configuration, and an unconfigured
+active profile at wiring are all refused; and a case capped at
+two calls' spend sees its third live statement refused before
+transport, the refusal on its chain, and its offline draft
+land afterwards. Zero-tolerance counters: unpriced calls,
+silent fallbacks accepted, budget breaches executed, and
+ledger costs wrong — all zero.
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
@@ -916,7 +1009,10 @@ storage of their own). Migration 0010 added `media_assessments`
 (append-only adverse-media assessments; the articles themselves
 ride the evidence chain, and the similarity scoring is
 deterministic code over stored records, so no vector store is
-needed). Later rounds add LangGraph checkpointing on Postgres.
+needed). Migration 0011 added `model_call_ledger` and
+`model_budget_events` (the model gateway's append-only cost
+ledger and its budget-refusal records; see the gateway section
+above). Later rounds add LangGraph checkpointing on Postgres.
 
 ## Ports
 
@@ -939,11 +1035,14 @@ needed). Later rounds add LangGraph checkpointing on Postgres.
 | `ProfileStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `AdverseMediaSource` | licensed news database (deployment-specific) | reference JSON corpus |
 | `MediaStore` | PostgreSQL via migrations | SQLite file; in-memory |
-| `NarrativeComposer` (model port) | hosted frontier profile (key wired per deployment) | deterministic offline composer |
+| `NarrativeComposer` (model port) | the model gateway's profiles (R13): hosted frontier / in-boundary, keys wired per deployment | deterministic offline composer |
+| `ModelLedgerStore` | PostgreSQL via migrations | SQLite file; in-memory |
+| `ModelTransport` | HTTPS JSON via httpx | stub transports returning provider-shaped responses |
 
-The model gateway (R13) arrives as a further port behind the
-same discipline: decisions in code, citations on everything,
-untrusted input quarantined (Law 7).
+The model gateway (R13) sits behind the composer port under
+the same discipline: decisions in code, citations on
+everything, untrusted input quarantined (Law 7) — and every
+call priced, ledgered, and budget-checked before transport.
 
 ## The eight laws, as a checklist
 

@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R12 of 20)
+## What is built at this round (R13 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -319,9 +319,37 @@ docker compose up --build
   profile version used, and surface in the investigation
   record as cited findings with their band stated; media
   never dispositions a case and never moves its state.
+- **Model gateway + cost ledger (R13).** Every drafting call
+  now goes through a gateway whose profiles are governed data,
+  not code branches: `offline` (the deterministic composer),
+  `hosted-frontier` (a hosted frontier model over the Anthropic
+  Messages API), and `in-boundary` (an open-weight model served
+  inside the bank's boundary over an OpenAI-compatible
+  endpoint). Loading is fail-closed — a duplicate profile id, a
+  live profile with no endpoint, a model with no price entry,
+  or a malformed price refuses the configuration outright —
+  and selecting an unknown or unconfigured profile refuses
+  loudly at call time. There is no fallback anywhere: the
+  gateway never substitutes one profile for another. The live
+  adapters are real HTTP clients (exercised against stub
+  transports in the tests and evals), and their text passes the
+  same figure gate offline text does. **Every call is priced
+  and ledgered** — case, purpose (`record_draft`, `sar_draft`),
+  profile, model, tokens and their basis (provider-reported, or
+  the adapter's stated estimate), the versioned price table's
+  unit prices, and the exact Decimal cost — offline calls
+  included, at zero. A per-case budget cap (configuration)
+  refuses further live calls for a case whose spend reaches
+  it, *before* any transport is touched; the refusal is
+  recorded as a ledger budget event, a case audit event, and
+  an item on the case's hash chain, and the caller may still
+  finish the case on the offline profile — named by the
+  caller, never switched to silently. Rollups read per case
+  (by purpose and by profile, with the budget position) and
+  per day across the portfolio.
 
-The rest — the model gateway, the analyst console — lands in
-rounds R13–R14 per the round map in `docs/architecture.md`.
+The rest — the analyst console — lands in R14 per the round
+map in `docs/architecture.md`.
 
 ## Configuration
 
@@ -336,13 +364,20 @@ rounds R13–R14 per the round map in `docs/architecture.md`.
 | `TRANSACTION_STREAMS_PATH` | `./data/transaction_streams.json` | Reference transaction feed (full-history streams) |
 | `TYPOLOGY_RULES_PATH` | `./data/typology_rules.json` | Reference typology rule-pack feed |
 | `ADVERSE_MEDIA_PATH` | `./data/adverse_media.json` | Reference adverse-media corpus (stand-in for a licensed news database) |
+| `MODEL_PROFILES_PATH` | `./data/model_profiles.json` | Model gateway profiles + per-case budget cap (R13), validated fail-closed at startup |
+| `MODEL_PRICES_PATH` | `./data/model_prices.json` | The versioned model price table (R13) — governed reference data |
+| `AML_MODEL_PROFILE` | `offline` | The deployment's own model profile; resolved at startup — unknown or unconfigured refuses the boot |
+| `ANTHROPIC_API_KEY` | _(unset)_ | Key for the `hosted-frontier` profile; unset means that profile is unconfigured and refuses loudly |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Endpoint override for the `hosted-frontier` profile |
+| `IN_BOUNDARY_MODEL_URL` | _(unset)_ | The bank-boundary model server's base URL for the `in-boundary` profile; unset means unconfigured |
+| `IN_BOUNDARY_MODEL_API_KEY` | _(unset)_ | Key for the `in-boundary` endpoint, when that server requires one |
 | `MIGRATIONS_DIR` | `./migrations` | Numbered SQL migrations |
 | `LOG_LEVEL` | `INFO` | Log level |
 
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, KYC profiles, counterparties, adverse media, API, SQL store
+make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, KYC profiles, counterparties, adverse media, model gateway, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 
@@ -385,7 +420,11 @@ on ordinary banking prose (0), reviews un-fencing quarantined
 content (0), namesakes graded strong in media screening (0),
 media changing a case's state (0), article instructions left
 unquarantined (0), uncited media claims in a record (0), and
-media relevance bands wrong on the graded corpus (0).
+media relevance bands wrong on the graded corpus (0), model
+calls without a priced ledger entry (0), silent profile
+fallbacks accepted (0), budget-breaching calls reaching the
+transport (0), and ledger costs not matching tokens × price
+(0).
 
 ## Honest status
 
@@ -397,10 +436,16 @@ media relevance bands wrong on the graded corpus (0).
   to the port, and no shipped article is real reporting.
 - The monitoring system is a port with a reference feed; no real
   core/monitoring vendor is connected.
-- Investigation narrative (R4) and SAR narrative drafting (R6) run
-  on the deterministic offline composer; the live model profile is
-  defined behind the model port and not yet exercised — it refuses
-  loudly until a key is wired.
+- Investigation narrative (R4) and SAR narrative drafting (R6)
+  run on the deterministic offline composer by default. The
+  gateway's live profiles (R13) are real adapters behind the
+  model port, exercised against stub transports with
+  provider-shaped responses; no live key is wired in this repo,
+  so a live profile selected without its endpoint/key refuses
+  loudly — it is never silently replaced by the offline
+  composer. Prices in `data/model_prices.json` are governed
+  reference data with a stated basis and as-of date, maintained
+  by the deployment.
 - No SAR is ever actually filed — the blueprint ends at an approved,
   sealed case file. As of R10 the line stops exactly there: a
   narrative approved under dual control, its case file sealed and
