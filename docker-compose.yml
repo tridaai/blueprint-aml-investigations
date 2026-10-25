@@ -1,0 +1,47 @@
+# Local stack: the agent plus its production-profile stores.
+# The app defaults to SQLite + a filesystem object store on a bare
+# `uv run` / `make serve`; under compose it runs the Postgres profile
+# with the evidence store on SeaweedFS's S3 gateway (service name
+# kept `minio`, per portfolio convention).
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: amlinvestigations
+      POSTGRES_PASSWORD: <redacted>
+      POSTGRES_DB: amlinvestigations
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amlinvestigations"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: chrislusf/seaweedfs:latest
+    command: server -s3 -dir=/data
+    ports:
+      - "8333:8333"
+    volumes:
+      - objectdata:/data
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://amlinvestigations:amlinvestigations@db:5432/amlinvestigations
+      S3_ENDPOINT_URL: http://minio:8333
+      S3_BUCKET: aml-evidence
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+volumes:
+  pgdata:
+  objectdata:
