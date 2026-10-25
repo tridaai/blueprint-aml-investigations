@@ -1,0 +1,982 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AML Investigations — Analyst Console</title>
+<style>
+  :root { --indigo:#4F46E5; --ink:#0A0A0A; --mut:#5b5b66; --line:#e4e4ea; --bg:#ffffff; --panel:#f7f7fb;
+          --red:#b3261e; --redbg:#fdecec; --amber:#8a5a00; --amberbg:#fdf3e0; --green:#137333; --greenbg:#e7f6ec; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "Plus Jakarta Sans", system-ui, sans-serif; color:var(--ink); background:var(--bg); }
+  header { display:flex; align-items:center; gap:14px; padding:14px 28px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header img { width:40px; height:40px; }
+  header h1 { font-size:20px; margin:0; }
+  header .sub { color:var(--mut); font-size:13px; }
+  header .spacer { flex:1; }
+  .identity { display:flex; align-items:flex-end; gap:8px; }
+  .identity label { display:block; font-size:11px; color:var(--mut); text-transform:uppercase; letter-spacing:.06em; }
+  .identity input, .identity select { padding:7px 9px; border:1px solid var(--line); border-radius:8px; font:inherit; font-size:14px; margin-top:3px; background:#fff; }
+  button { background:var(--indigo); color:#fff; border:0; border-radius:8px; padding:8px 14px; font:inherit; font-size:14px; cursor:pointer; }
+  button.ghost { background:#fff; color:var(--indigo); border:1px solid var(--indigo); }
+  button.small { padding:5px 10px; font-size:13px; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  main { display:grid; grid-template-columns: 340px 1fr; min-height: calc(100vh - 150px); }
+  aside { padding:18px; border-right:1px solid var(--line); }
+  #workspace { padding:6px 22px 22px; overflow:auto; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--mut); margin:4px 0 12px; }
+  section.panel { padding:16px 0 8px; border-bottom:1px solid var(--line); }
+  section.panel:last-child { border-bottom:0; }
+  .queue-tools { display:flex; gap:8px; margin-bottom:12px; }
+  .queue-tools select { flex:1; padding:7px 9px; border:1px solid var(--line); border-radius:8px; font:inherit; font-size:13px; background:#fff; }
+  .qcard { border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:8px; cursor:pointer; background:#fff; }
+  .qcard.active { border-color:var(--indigo); background:var(--panel); }
+  .qcard .cid { font-weight:700; font-size:14px; }
+  .qcard .meta { font-size:12px; color:var(--mut); margin-top:2px; }
+  .qcard .badges { margin-top:6px; }
+  .chip { display:inline-block; font-size:11px; padding:2px 8px; border-radius:99px; background:#eef; color:var(--indigo); margin:0 4px 4px 0; }
+  .chip.red { background:var(--redbg); color:var(--red); }
+  .chip.amber { background:var(--amberbg); color:var(--amber); }
+  .chip.green { background:var(--greenbg); color:var(--green); }
+  .chip.grey { background:#eee; color:var(--mut); }
+  table.attr { border-collapse:collapse; font-size:13px; width:100%; margin-bottom:10px; }
+  table.attr td, table.attr th { border-bottom:1px solid var(--line); padding:4px 6px; text-align:left; vertical-align:top; }
+  table.attr td.k { color:var(--mut); width:190px; }
+  table.data { border-collapse:collapse; font-size:12.5px; width:100%; margin-bottom:12px; }
+  table.data td, table.data th { border-bottom:1px solid var(--line); padding:4px 6px; text-align:left; vertical-align:top; }
+  table.data th { color:var(--mut); font-weight:600; }
+  .card { border:1px solid var(--line); background:var(--panel); border-radius:10px; padding:10px 12px; margin-bottom:10px; font-size:13.5px; }
+  .card h3 { margin:0 0 6px; font-size:14px; }
+  .card .k { color:var(--mut); font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
+  .empty { color:var(--mut); font-size:14px; }
+  .stmt { margin:4px 0; line-height:1.45; font-size:14px; }
+  .cite { font-size:12px; color:var(--indigo); }
+  .fence { border:1.5px dashed var(--red); background:#fff7f6; border-radius:8px; padding:8px 10px; margin:6px 0; font-size:13px; }
+  .fence .marker { font-weight:700; color:var(--red); }
+  .fence .excerpt { display:block; margin-top:4px; white-space:pre-wrap; word-break:break-word; }
+  .form { border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin:10px 0; background:#fff; }
+  .form h3 { margin:0 0 8px; font-size:14px; }
+  .form label.lbl { display:block; font-size:13px; color:var(--mut); margin:8px 0 3px; }
+  .form input[type=text], .form input[type=number], .form select, .form textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; font-size:14px; background:#fff; }
+  .checks { display:flex; flex-wrap:wrap; gap:6px 14px; margin:4px 0; }
+  .checks label { font-size:13px; display:flex; gap:5px; align-items:center; }
+  .msg { border-radius:8px; padding:8px 11px; font-size:13.5px; margin:8px 0; white-space:pre-wrap; }
+  .msg.err { background:var(--redbg); color:var(--red); border:1px solid #f0c6c2; }
+  .msg.ok { background:var(--greenbg); color:var(--green); border:1px solid #bfe6cc; }
+  .hash { font-family: ui-monospace, monospace; font-size:11.5px; word-break:break-all; }
+  .conflict { border:1px solid #f0c6c2; background:#fff7f6; border-radius:8px; padding:8px 10px; margin:6px 0; font-size:13.5px; }
+  footer { display:flex; align-items:center; gap:16px; padding:14px 28px; border-top:1px solid var(--line); font-size:14px; }
+  footer img { width:24px; height:24px; }
+  footer a { color:var(--indigo); text-decoration:none; font-weight:600; }
+</style>
+</head>
+<body>
+<header>
+  <img src="https://trida.ai/logos-rounded/trida-rounded.png" alt="Trida AI">
+  <div>
+    <h1>AML Alert Investigations</h1>
+    <div class="sub">Harborline Bank — analyst console (reference prototype). The agent assembles and drafts; a named analyst decides every case.</div>
+  </div>
+  <div class="spacer"></div>
+  <div class="identity">
+    <div>
+      <label for="analyst-name">Analyst name</label>
+      <input id="analyst-name" type="text" placeholder="e.g. j.rivera" autocomplete="off">
+    </div>
+    <div>
+      <label for="analyst-role">Role</label>
+      <select id="analyst-role">
+        <option value="">— choose —</option>
+        <option value="analyst">analyst</option>
+        <option value="senior_analyst">senior_analyst</option>
+        <option value="l2_reviewer">l2_reviewer</option>
+      </select>
+    </div>
+    <button id="identity-save" class="ghost" type="button">Set identity</button>
+  </div>
+</header>
+<main>
+  <aside>
+    <h2>Case queue</h2>
+    <div class="queue-tools">
+      <select id="queue-sort" aria-label="Sort queue">
+        <option value="urgency">Sort: clock urgency</option>
+        <option value="newest">Sort: newest detection</option>
+        <option value="severity">Sort: severity</option>
+      </select>
+      <select id="queue-filter" aria-label="Filter queue">
+        <option value="all">All cases</option>
+        <option value="attention">Clock attention</option>
+        <option value="awaiting_analyst">Awaiting analyst</option>
+        <option value="pending_confirmation">Pending confirmation</option>
+        <option value="sar_pending">SAR pending</option>
+        <option value="quarantined">Quarantined</option>
+        <option value="closed">Closed / filed</option>
+      </select>
+    </div>
+    <div id="queue"></div>
+  </aside>
+  <div id="workspace">
+    <p class="empty" style="margin-top:18px;">Pick a case from the queue. The workspace shows the whole file — alert, clocks, profile, the hash-chained evidence, screening, typologies, the investigation record, and the gates — exactly as the API serves it.</p>
+  </div>
+</main>
+<footer>
+  <img src="https://trida.ai/logos-rounded/trida-rounded.png" alt="Trida AI">
+  <span>Built by Trida AI</span>
+  <a href="https://trida.ai">Visit Trida AI →</a>
+  <a href="https://trida.ai/blog?category=blueprints">View all blueprints →</a>
+</footer>
+<script>
+"use strict";
+/* The analyst console for Blueprint #15. One file, no build step,
+   no framework. Every value the API returns is rendered as text —
+   evidence content, memos, excerpts and names are data, and data
+   is never turned into markup. Every action below is a call to an
+   existing gated API route; the console adds no write path of its
+   own, and every refusal the API returns is shown as-is. */
+const $ = (id) => document.getElementById(id);
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+function clear(node) { node.replaceChildren(); }
+function chip(text, kind) { return el("span", "chip" + (kind ? " " + kind : ""), text); }
+function panel(parent, title) {
+  const section = el("section", "panel");
+  section.append(el("h2", null, title));
+  parent.append(section);
+  return section;
+}
+function kvTable(rows) {
+  const table = el("table", "attr");
+  for (const [key, value] of rows) {
+    const tr = el("tr");
+    tr.append(el("td", "k", key), el("td", null, value === null || value === undefined || value === "" ? "—" : value));
+    table.append(tr);
+  }
+  return table;
+}
+function dataTable(headers, rowList) {
+  const table = el("table", "data");
+  const head = el("tr");
+  for (const h of headers) head.append(el("th", null, h));
+  table.append(head);
+  for (const cells of rowList) {
+    const tr = el("tr");
+    for (const c of cells) {
+      const td = el("td");
+      if (c instanceof Node) td.append(c); else td.textContent = c === null || c === undefined || c === "" ? "—" : String(c);
+      tr.append(td);
+    }
+    table.append(tr);
+  }
+  return table;
+}
+function flatRows(obj) {
+  const rows = [];
+  for (const [key, value] of Object.entries(obj || {})) {
+    if (value === null || typeof value !== "object") rows.push([key, value]);
+  }
+  return rows;
+}
+function showMsg(box, message, ok) {
+  clear(box);
+  box.append(el("div", "msg " + (ok ? "ok" : "err"), message));
+}
+function errText(result) {
+  if (result.data && result.data.detail) return String(result.data.detail);
+  return "Request failed with status " + result.status + ".";
+}
+async function api(method, url, body) {
+  const opts = { method: method, headers: {} };
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(url, opts);
+  const text = await res.text();
+  let data = null;
+  if (text) { try { data = JSON.parse(text); } catch (e) { data = null; } }
+  return { ok: res.ok, status: res.status, data: data };
+}
+
+/* --- analyst identity -------------------------------------------------
+   Actions are recorded under a named analyst with a coded role.
+   The console will not submit an action without one; the API
+   refuses anonymous and system actors on its own side too. */
+const identity = { name: "", role: "" };
+function loadIdentity() {
+  try {
+    const raw = localStorage.getItem("aml-console-identity");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      identity.name = parsed.name || "";
+      identity.role = parsed.role || "";
+    }
+  } catch (e) { /* a fresh console simply starts unnamed */ }
+  $("analyst-name").value = identity.name;
+  if (identity.role) $("analyst-role").value = identity.role;
+}
+function saveIdentity() {
+  identity.name = $("analyst-name").value.trim();
+  identity.role = $("analyst-role").value;
+  try { localStorage.setItem("aml-console-identity", JSON.stringify(identity)); } catch (e) { /* in-memory is enough */ }
+}
+function requireIdentity(box) {
+  if (!identity.name || !identity.role) {
+    showMsg(box, "Set your analyst name and role in the header first — every action is recorded under a named analyst.", false);
+    return false;
+  }
+  return true;
+}
+
+/* --- queue ------------------------------------------------------------ */
+let VOCAB = null;
+let ALERTS = {};
+let CASES = [];
+let BOARD = {};
+let QUAR_FLAGGED = {};
+let SELECTED = null;
+
+const STATE_RANK = { overdue: 0, due: 1, due_soon: 2, on_track: 3, satisfied: 4, closed_no_file: 5, not_applicable: 6 };
+const STATE_KIND = { overdue: "red", due: "red", due_soon: "amber", on_track: "green", satisfied: "green", closed_no_file: "grey", not_applicable: "grey" };
+const SEVERITY_RANK = { high: 0, medium: 1, low: 2 };
+
+function clockSummary(caseId) {
+  const view = BOARD[caseId];
+  if (!view) return { rank: 3, deadline: "", filing: null, continuing: null };
+  let rank = STATE_RANK[view.filing.state] !== undefined ? STATE_RANK[view.filing.state] : 3;
+  let deadline = view.filing.operative_deadline || "";
+  const cont = view.continuing_activity || null;
+  if (cont) {
+    const crank = STATE_RANK[cont.state] !== undefined ? STATE_RANK[cont.state] : 3;
+    if (crank < rank) { rank = crank; deadline = cont.operative_deadline || deadline; }
+  }
+  return { rank: rank, deadline: deadline, filing: view.filing, continuing: cont };
+}
+
+async function loadQueue() {
+  const results = await Promise.all([
+    api("GET", "/cases"),
+    api("GET", "/clocks/board"),
+    api("GET", "/queues/quarantine"),
+  ]);
+  CASES = results[0].ok ? results[0].data : [];
+  BOARD = {};
+  if (results[1].ok) for (const view of results[1].data) BOARD[view.case_id] = view;
+  QUAR_FLAGGED = {};
+  if (results[2].ok) {
+    for (const entry of results[2].data) {
+      if (entry.status === "flagged") QUAR_FLAGGED[entry.case_id] = (QUAR_FLAGGED[entry.case_id] || 0) + 1;
+    }
+  }
+  renderQueue();
+}
+
+function renderQueue() {
+  const box = $("queue");
+  clear(box);
+  const sort = $("queue-sort").value;
+  const filter = $("queue-filter").value;
+  let rows = CASES.slice();
+  rows = rows.filter((c) => {
+    if (filter === "all") return true;
+    if (filter === "attention") return clockSummary(c.case_id).rank <= 2;
+    if (filter === "quarantined") return (QUAR_FLAGGED[c.case_id] || 0) > 0;
+    if (filter === "closed") return c.status === "closed" || c.status === "filed_sar";
+    return c.status === filter;
+  });
+  rows.sort((a, b) => {
+    if (sort === "newest") return String(b.detected_on).localeCompare(String(a.detected_on));
+    if (sort === "severity") return (SEVERITY_RANK[a.severity] ?? 3) - (SEVERITY_RANK[b.severity] ?? 3);
+    const ua = clockSummary(a.case_id), ub = clockSummary(b.case_id);
+    if (ua.rank !== ub.rank) return ua.rank - ub.rank;
+    return String(ua.deadline || "9999").localeCompare(String(ub.deadline || "9999"));
+  });
+  if (!rows.length) { box.append(el("p", "empty", "No cases match.")); return; }
+  for (const c of rows) {
+    const card = el("div", "qcard" + (c.case_id === SELECTED ? " active" : ""));
+    const top = el("div");
+    top.append(el("span", "cid", c.case_id), document.createTextNode("  "), chip(c.status, c.status === "closed" || c.status === "filed_sar" ? "green" : ""));
+    card.append(top);
+    card.append(el("div", "meta", c.rule_id + " · " + c.severity + " · customer " + c.customer_id + " · account " + c.account_id + " · detected " + c.detected_on));
+    const badges = el("div", "badges");
+    const summary = clockSummary(c.case_id);
+    if (summary.filing) {
+      badges.append(chip("Filing clock: " + summary.filing.state.replace(/_/g, " ") + (summary.filing.operative_deadline ? " · due " + summary.filing.operative_deadline : ""), STATE_KIND[summary.filing.state]));
+    }
+    if (summary.continuing) {
+      badges.append(chip("Continuing review: " + summary.continuing.state.replace(/_/g, " ") + (summary.continuing.review_due_on ? " · review by " + summary.continuing.review_due_on : ""), STATE_KIND[summary.continuing.state]));
+    }
+    if (QUAR_FLAGGED[c.case_id]) badges.append(chip("⚠ " + QUAR_FLAGGED[c.case_id] + " quarantined", "red"));
+    if (c.screening_stale) badges.append(chip("Screening stale", "amber"));
+    if (c.legal_hold) badges.append(chip("Legal hold", "amber"));
+    card.append(badges);
+    card.addEventListener("click", () => openCase(c.case_id));
+    box.append(card);
+  }
+}
+
+/* --- workspace ---------------------------------------------------------- */
+async function openCase(caseId) {
+  SELECTED = caseId;
+  renderQueue();
+  const ws = $("workspace");
+  clear(ws);
+  ws.append(el("p", "empty", "Loading the case file…"));
+  const id = caseId;
+  const keys = ["case", "clock", "profile", "evidence", "verify", "screening", "transactions",
+    "typologies", "investigation", "dispositions", "sar", "approval", "reviews",
+    "quarantine", "media", "ledger", "costs"];
+  const results = await Promise.all([
+    api("GET", "/cases/" + id),
+    api("GET", "/cases/" + id + "/clock"),
+    api("GET", "/cases/" + id + "/profile"),
+    api("GET", "/cases/" + id + "/evidence"),
+    api("GET", "/cases/" + id + "/evidence/verify"),
+    api("GET", "/cases/" + id + "/screening"),
+    api("GET", "/cases/" + id + "/transactions"),
+    api("GET", "/cases/" + id + "/typologies"),
+    api("GET", "/cases/" + id + "/investigation"),
+    api("GET", "/cases/" + id + "/dispositions"),
+    api("GET", "/cases/" + id + "/sar"),
+    api("GET", "/cases/" + id + "/sar/approval"),
+    api("GET", "/cases/" + id + "/continuing-reviews"),
+    api("GET", "/cases/" + id + "/quarantine"),
+    api("GET", "/cases/" + id + "/media/assessments"),
+    api("GET", "/cases/" + id + "/model-ledger"),
+    api("GET", "/cases/" + id + "/model-costs"),
+  ]);
+  const R = {};
+  keys.forEach((key, i) => { R[key] = results[i]; });
+  clear(ws);
+  if (!R.case.ok) { ws.append(el("p", "empty", errText(R.case))); return; }
+  renderCaseHeader(ws, R);
+  renderClocks(ws, R);
+  renderProfile(ws, R);
+  renderEvidence(ws, R);
+  renderScreening(ws, R);
+  renderTransactions(ws, R);
+  renderTypologies(ws, R);
+  renderInvestigation(ws, R);
+  renderDispositions(ws, id, R);
+  renderSar(ws, id, R);
+  renderReviews(ws, id, R);
+  renderMedia(ws, R);
+  renderCosts(ws, R);
+}
+
+async function reloadWorkspace() {
+  if (SELECTED) { await loadQueue(); await openCase(SELECTED); }
+}
+
+function renderCaseHeader(ws, R) {
+  const c = R.case.data;
+  const section = panel(ws, "Case " + c.case_id);
+  const alert = ALERTS[c.alert_id];
+  const rows = [
+    ["Status", c.status], ["Alert", c.alert_id], ["Monitoring rule", c.rule_id],
+    ["Severity", c.severity], ["Customer", c.customer_id], ["Account", c.account_id],
+    ["Initial detection", c.detected_on], ["Opened", c.opened_at], ["Assigned analyst", c.assigned_analyst],
+    ["Legal hold", c.legal_hold ? "yes" : "no"], ["Screening stale", c.screening_stale ? "yes" : "no"],
+    ["Retention until", c.retention_until],
+  ];
+  if (alert && alert.summary) rows.push(["Alert summary", alert.summary]);
+  section.append(kvTable(rows));
+  if (c.flags && c.flags.length) {
+    const flags = el("div");
+    for (const flag of c.flags) flags.append(chip(flag, "amber"));
+    section.append(flags);
+  }
+  if (c.disposition) {
+    section.append(el("p", "stmt", "Standing disposition (state-machine token): " +
+      c.disposition.decision + " by " + c.disposition.analyst + " — " + c.disposition.reason_code +
+      (c.disposition.rationale ? " — " + c.disposition.rationale : "")));
+  }
+}
+
+function renderClocks(ws, R) {
+  const section = panel(ws, "Regulatory clocks");
+  if (!R.clock.ok) { section.append(el("p", "empty", errText(R.clock))); return; }
+  const view = R.clock.data;
+  const f = view.filing;
+  section.append(kvTable([
+    ["Filing clock", f.state.replace(/_/g, " ")],
+    ["Subject identified", f.subject_identified ? "yes — " + (f.subject_basis || "") : "no"],
+    ["Initial deadline (detection + 30d)", f.initial_deadline],
+    ["Outer deadline (detection + 60d)", f.outer_deadline],
+    ["Operative deadline", f.operative_deadline + " (" + (f.operative_deadline_kind || "") + ")"],
+    ["Days remaining", f.days_remaining === null || f.days_remaining === undefined ? "—" : String(f.days_remaining)],
+    ["Monitor review due", f.monitor_review_due_on],
+  ]));
+  if (f.no_file_rationale_codes && f.no_file_rationale_codes.length) {
+    section.append(el("p", "stmt", "No-file documentation — disposition " + (f.no_file_disposition_id || "") +
+      ", coded rationale: " + f.no_file_rationale_codes.join(", ") + "."));
+  }
+  const cont = view.continuing_activity;
+  if (cont) {
+    section.append(el("h3", null, "Continuing-activity clock — cycle " + cont.cycle));
+    section.append(kvTable([
+      ["State", cont.state.replace(/_/g, " ")],
+      ["Prior case", cont.prior_case_id],
+      ["Determination", cont.determination_on],
+      ["Review due (determination + 90d)", cont.review_due_on],
+      ["Filing due (determination + 120d)", cont.filing_due_on],
+      ["Operative deadline", cont.operative_deadline + " (" + (cont.operative_deadline_kind || "") + ")"],
+      ["Days remaining", cont.days_remaining === null || cont.days_remaining === undefined ? "—" : String(cont.days_remaining)],
+      ["Answered by", cont.answered_by_review_id ? "review " + cont.answered_by_review_id + " — " + (cont.answered_outcome || "") : "not yet"],
+    ]));
+  }
+  if (view.continuing_history && view.continuing_history.length > 1) {
+    section.append(el("p", "stmt", "Cycle history: " + view.continuing_history.map((cyc) =>
+      "cycle " + cyc.cycle + " (" + cyc.state.replace(/_/g, " ") + (cyc.answered_outcome ? ", " + cyc.answered_outcome : "") + ")").join(" · ")));
+  }
+  if (view.escalations && view.escalations.length) {
+    section.append(el("h3", null, "Recorded clock escalations"));
+    section.append(dataTable(["Clock", "Deadline kind", "Deadline", "State", "As of", "Days overdue"],
+      view.escalations.map((e) => [e.clock_kind, e.deadline_kind, e.deadline, e.state, e.as_of, e.days_overdue === null || e.days_overdue === undefined ? "—" : String(e.days_overdue)])));
+  }
+  if (view.violations && view.violations.length) {
+    for (const violation of view.violations) section.append(el("div", "msg err", "Clock violation: " + violation));
+  }
+}
+
+function renderProfile(ws, R) {
+  const section = panel(ws, "Customer profile (KYC)");
+  if (!R.profile.ok) {
+    section.append(el("p", "empty", R.profile.status === 404
+      ? "No profile view has been assembled for this customer yet. Assembly is a service act (POST /customers/{customer_id}/profile); the console only reads it."
+      : errText(R.profile)));
+    return;
+  }
+  const p = R.profile.data;
+  section.append(kvTable([
+    ["Profile", p.profile_id + " · version " + p.version],
+    ["Assembled", p.assembled_at + " · as of " + p.as_of],
+    ["Freshness policy", p.freshness_policy_version],
+  ]));
+  section.append(el("h3", null, "Identity facts"));
+  section.append(dataTable(["Field", "Value", "Source", "Source case", "Evidence seq"],
+    (p.identity_facts || []).map((fact) => [fact.field, fact.value, fact.source_kind, fact.source_case_id, String(fact.evidence_seq)])));
+  for (const conflict of p.identity_conflicts || []) {
+    const box = el("div", "conflict");
+    box.append(el("strong", null, "Identity conflict — " + conflict.field + ": "));
+    box.append(document.createTextNode("the record carries " + (conflict.values || []).join(" and ") +
+      ". Both stand as recorded; nothing was merged or picked silently."));
+    section.append(box);
+  }
+  section.append(el("h3", null, "Accounts"));
+  section.append(dataTable(["Account", "Type", "Opened", "Profile on record", "Expected monthly"],
+    (p.accounts || []).map((a) => [a.account_id, a.account_type || "—", a.opened_on || "—",
+      a.profile_present ? "yes" : "no — gap named",
+      a.expected_monthly_amount === null || a.expected_monthly_amount === undefined ? "—" : String(a.expected_monthly_amount) + " / " + (a.expected_monthly_count ?? "—") + " txns"])));
+  section.append(el("h3", null, "Freshness"));
+  section.append(dataTable(["Fact class", "Last corroborated", "Limit (days)", "State"],
+    (p.freshness || []).map((fr) => [fr.fact_class, fr.last_corroborated_on || "never", String(fr.limit_days), fr.stale ? "STALE" : "current"])));
+  if (p.case_history && p.case_history.length) {
+    section.append(el("h3", null, "Case history"));
+    section.append(dataTable(["Case", "Rule", "Severity", "Status", "Detected", "Disposition", "SAR filed"],
+      p.case_history.map((h) => [h.case_id, h.rule_id, h.severity, h.status, h.detected_on,
+        h.disposition_outcome || "—", h.filed_sar ? "yes" : "no"])));
+  }
+  if (p.screening_history && p.screening_history.length) {
+    section.append(el("h3", null, "Screening history"));
+    for (const entry of p.screening_history) {
+      const card = el("div", "card");
+      card.append(el("h3", null, String(entry.list_kind || "screening") + " · " + String(entry.version || "")));
+      const rows = flatRows(entry);
+      if (rows.length) card.append(kvTable(rows.map(([k, v]) => [k, v === null || v === undefined ? "—" : String(v)])));
+      section.append(card);
+    }
+  }
+}
+
+function renderEvidence(ws, R) {
+  const section = panel(ws, "Evidence — hash chain");
+  if (!R.evidence.ok) { section.append(el("p", "empty", errText(R.evidence))); return; }
+  const records = R.quarantine.ok ? R.quarantine.data.quarantine : [];
+  const byEvidenceSeq = {};
+  for (const record of records) byEvidenceSeq[record.evidence_seq] = record;
+  if (R.verify.ok) {
+    section.append(el("p", "stmt", "Chain verification: " + (R.verify.data.chain_intact ? "intact — every link recomputes." : "FAILED — see the audit trail.")));
+  }
+  section.append(dataTable(["Seq", "Kind", "Source", "Captured by", "Captured at", "Chain hash", "Quarantine"],
+    R.evidence.data.map((item) => [
+      String(item.seq), item.kind, item.source_ref, item.captured_by, item.captured_at,
+      Object.assign(el("span", "hash"), { textContent: String(item.chain_hash).slice(0, 16) + "…" }),
+      byEvidenceSeq[item.seq] ? chip("QUARANTINED", "red") : "—",
+    ])));
+  if (records.length) {
+    section.append(el("h3", null, "Quarantine records (Law 7 — instructions inside evidence are fenced, never obeyed)"));
+    for (const record of records) renderQuarantineRecord(section, R.case.data.case_id, record);
+  }
+}
+
+function renderQuarantineRecord(section, caseId, record) {
+  const card = el("div", "card");
+  const head = el("h3");
+  head.append(document.createTextNode("Evidence #" + record.evidence_seq + " · " + record.source_kind +
+    " · pattern pack " + record.pack_version + " · "));
+  head.append(chip(record.status === "reviewed" ? "reviewed" : "flagged — awaiting review", record.status === "reviewed" ? "green" : "red"));
+  card.append(head);
+  for (const field of record.fields || []) {
+    for (const match of field.matches || []) {
+      const fence = el("div", "fence");
+      fence.append(el("span", "marker", "[quarantined instruction text removed]"));
+      fence.append(document.createTextNode("  " + match.pattern_id + " (" + match.family + ") in field " + field.field + ":"));
+      fence.append(el("span", "excerpt", match.excerpt));
+      card.append(fence);
+    }
+  }
+  if (record.review) {
+    card.append(el("p", "stmt", "Reviewed by " + record.review.reviewer + " — " + (record.review.note || "no note") +
+      ". Review is an audit act: the content stays fenced everywhere it is consumed, permanently."));
+  } else {
+    const msgBox = el("div");
+    const note = document.createElement("input");
+    note.type = "text"; note.placeholder = "Review note (optional)"; note.style.width = "100%";
+    const button = el("button", "small", "Mark reviewed");
+    button.addEventListener("click", async () => {
+      if (!requireIdentity(msgBox)) return;
+      button.disabled = true;
+      const result = await api("POST", "/cases/" + caseId + "/quarantine/" + record.quarantine_seq + "/review",
+        { reviewer: identity.name, note: note.value });
+      if (result.ok) { showMsg(msgBox, "Review recorded under " + identity.name + ". The content remains fenced.", true); await reloadWorkspace(); }
+      else { showMsg(msgBox, errText(result), false); button.disabled = false; }
+    });
+    const form = el("div", "form");
+    form.append(el("h3", null, "Record a review"), note, el("div"), button, msgBox);
+    card.append(form);
+  }
+  section.append(card);
+}
+
+function renderScreening(ws, R) {
+  const section = panel(ws, "Screening — version-pinned lists");
+  if (!R.screening.ok) { section.append(el("p", "empty", errText(R.screening))); return; }
+  const s = R.screening.data;
+  if (s.screening_stale) section.append(el("div", "msg err", "Screening is STALE: a newer list version exists than the pins below. Delta re-screening is required before this case can close."));
+  section.append(el("h3", null, "Pinned snapshots"));
+  section.append(dataTable(["List", "Version", "Snapshot", "Run", "Screened at"],
+    (s.screened_against || []).map((pin) => [pin.list_kind, pin.version, pin.snapshot_id, pin.run_id, pin.screened_at])));
+  if (s.runs && s.runs.length) {
+    section.append(el("h3", null, "Runs"));
+    section.append(dataTable(["Run", "At", "Actor", "Subjects", "Open hits", "Cleared hits", "Re-screen"],
+      s.runs.map((run) => [run.run_id, run.run_at, run.actor, String(run.subject_count), String(run.open_hits), String(run.cleared_hits), run.is_rescreen ? "yes" : "no"])));
+  }
+  section.append(el("h3", null, "Hits"));
+  if (s.hits && s.hits.length) {
+    section.append(dataTable(["Subject", "Role", "List entry", "List", "Version", "Score", "Strength", "Status", "Basis / clearance"],
+      s.hits.map((hit) => [hit.subject_name, hit.subject_role, hit.entry_name, hit.list_kind, hit.snapshot_version,
+        String(hit.score), hit.strength, hit.status, hit.cleared_reason || hit.status_reason || hit.basis || "—"])));
+  } else {
+    section.append(el("p", "empty", "No hits recorded."));
+  }
+}
+
+function renderTransactions(ws, R) {
+  const section = panel(ws, "Transactions");
+  if (!R.transactions.ok) { section.append(el("p", "empty", errText(R.transactions))); return; }
+  const t = R.transactions.data;
+  section.append(el("p", "stmt", (t.batches || []).length + " evidence-backed batch(es), " + (t.transactions || []).length + " transaction(s). Memos and counterparty names below are untrusted text, rendered as text."));
+  section.append(dataTable(["Transaction", "Posted", "Direction", "Amount", "Channel", "Cash", "Counterparty", "Memo"],
+    (t.transactions || []).map((txn) => [txn.transaction_id, txn.posted_at, txn.direction,
+      String(txn.amount) + " " + (txn.currency || ""), txn.channel, txn.cash ? "yes" : "no",
+      txn.counterparty || "—", txn.memo || "—"])));
+}
+
+function renderTypologies(ws, R) {
+  const section = panel(ws, "Typology findings — computed in code");
+  if (!R.typologies.ok) { section.append(el("p", "empty", errText(R.typologies))); return; }
+  const t = R.typologies.data;
+  if (!t.findings || !t.findings.length) { section.append(el("p", "empty", "No typology findings recorded.")); return; }
+  for (const finding of t.findings) {
+    const card = el("div", "card");
+    card.append(el("h3", null, finding.typology_id + (finding.variant ? " (" + finding.variant + ")" : "")));
+    const figures = Object.entries(finding.figures || {}).map(([k, v]) => k + ": " + v).join(" · ");
+    card.append(kvTable([
+      ["Account", finding.account_id],
+      ["Rule pack", finding.rule_pack_id + " " + finding.rule_pack_version],
+      ["Window", (finding.window_start || "—") + " → " + (finding.window_end || "—")],
+      ["Transactions", (finding.transaction_ids || []).join(", ")],
+      ["Figures", figures],
+      ["Detail", finding.detail || "—"],
+    ]));
+    section.append(card);
+  }
+}
+
+function selectOf(options, value) {
+  const select = document.createElement("select");
+  for (const opt of options) {
+    const option = document.createElement("option");
+    option.value = opt; option.textContent = opt;
+    if (opt === value) option.selected = true;
+    select.append(option);
+  }
+  return select;
+}
+function checkGroup(options) {
+  const box = el("div", "checks");
+  const inputs = [];
+  for (const opt of options) {
+    const code = Array.isArray(opt) ? opt[0] : opt;
+    const label = Array.isArray(opt) ? opt[1] : opt;
+    const wrap = el("label");
+    const input = document.createElement("input");
+    input.type = "checkbox"; input.value = code;
+    wrap.append(input, document.createTextNode(label));
+    box.append(wrap);
+    inputs.push(input);
+  }
+  return { node: box, read: () => inputs.filter((i) => i.checked).map((i) => i.value) };
+}
+function citeText(citation) {
+  return "evidence #" + citation.evidence_seq + (citation.element ? " · " + citation.element : "");
+}
+
+function renderInvestigation(ws, R) {
+  const section = panel(ws, "Investigation record");
+  if (!R.investigation.ok) { section.append(el("p", "empty", errText(R.investigation))); return; }
+  const inv = R.investigation.data;
+  const current = inv.current;
+  if (!current) { section.append(el("p", "empty", "No investigation record yet.")); return; }
+  section.append(kvTable([
+    ["Record", current.record_id + " · version " + current.version],
+    ["Composed by", current.actor + " · profile " + current.model_profile],
+    ["Created", current.created_at],
+    ["Versions on chain", String((inv.history || []).length)],
+  ]));
+  if (current.hypothesis) {
+    const card = el("div", "card");
+    card.append(el("h3", null, "Working hypothesis — " + current.hypothesis.label));
+    card.append(el("p", "stmt", current.hypothesis.statement || ""));
+    card.append(el("p", "stmt", "Supporting findings: " + ((current.hypothesis.supporting_finding_ids || []).join(", ") || "none") +
+      " · Counter findings: " + ((current.hypothesis.counter_finding_ids || []).join(", ") || "none")));
+    section.append(card);
+  }
+  section.append(el("h3", null, "Findings — every statement cited"));
+  for (const finding of current.findings || []) {
+    const card = el("div", "card");
+    card.append(el("h3", null, finding.key + " · " + finding.kind + " · " + finding.direction));
+    card.append(el("p", "stmt", finding.statement));
+    for (const citation of finding.citations || []) {
+      card.append(el("div", "cite", "↳ " + citeText(citation) + (citation.content ? " — " + citation.content : "")));
+    }
+    section.append(card);
+  }
+  if (current.counter_search) {
+    section.append(el("p", "stmt", "Counter-evidence search: ran — " + (current.counter_search.ran ? "yes" : "no") +
+      " · coverage: " + (current.counter_search.coverage || "—") +
+      " · checks: " + ((current.counter_search.checks || []).join(", ") || "—")));
+  }
+  if (current.open_questions && current.open_questions.length) {
+    section.append(el("h3", null, "Open questions"));
+    for (const q of current.open_questions) {
+      section.append(el("p", "stmt", "• " + q.question + " (needs: " + q.evidence_needed + ")"));
+    }
+  }
+}
+
+function renderDispositions(ws, caseId, R) {
+  const section = panel(ws, "Disposition — the analyst gate");
+  if (!R.dispositions.ok) { section.append(el("p", "empty", errText(R.dispositions))); return; }
+  const d = R.dispositions.data;
+  for (const record of d.dispositions || []) {
+    const card = el("div", "card");
+    card.append(el("h3", null, record.outcome.replace(/_/g, " ") + " — " + record.status));
+    card.append(kvTable([
+      ["Analyst", record.analyst_id + " (" + record.analyst_role + ")"],
+      ["Rationale codes", (record.rationale_codes || []).join(", ") + " · vocabulary " + record.rationale_vocabulary_version],
+      ["Cites record", record.record_id + " v" + record.record_version],
+      ["Decided", record.decided_at],
+      ["Note", record.note || "—"],
+    ]));
+    section.append(card);
+  }
+  for (const conf of d.confirmations || []) {
+    section.append(el("p", "stmt", "Confirmation: " + conf.outcome + " by " + conf.confirmer_id +
+      " (" + conf.confirmer_role + ")" + (conf.note ? " — " + conf.note : "")));
+  }
+  const pending = (d.dispositions || []).find((record) => record.status === "pending_confirmation");
+  if (pending) section.append(confirmationForm(caseId, pending));
+  const current = R.investigation.ok ? R.investigation.data.current : null;
+  if (current) section.append(dispositionForm(caseId, current));
+  else section.append(el("p", "empty", "The disposition form opens once an investigation record stands on the case."));
+}
+
+function dispositionForm(caseId, record) {
+  const form = el("div", "form");
+  form.append(el("h3", null, "Record a disposition"));
+  form.append(el("p", "stmt", "Cites investigation record " + record.record_id + " version " + record.version +
+    " — the gate refuses a stale citation, an anonymous analyst, or a rationale outside the coded vocabulary."));
+  const msgBox = el("div");
+  const outcomes = VOCAB ? Object.keys(VOCAB.dispositions.rationale_codes) :
+    ["close_no_action", "close_monitor", "escalate_sar", "escalate_l2", "request_more_evidence"];
+  const outcomeSel = selectOf(outcomes, "close_no_action");
+  const codesHost = el("div");
+  let codes = null;
+  const rebuildCodes = () => {
+    clear(codesHost);
+    const list = VOCAB ? (VOCAB.dispositions.rationale_codes[outcomeSel.value] || []) : [];
+    codes = checkGroup(list);
+    codesHost.append(el("label", "lbl", "Rationale codes (vocabulary " + (VOCAB ? VOCAB.dispositions.version : "") + ")"), codes.node);
+  };
+  outcomeSel.addEventListener("change", rebuildCodes);
+  rebuildCodes();
+  const missing = VOCAB ? checkGroup(VOCAB.dispositions.missing_evidence_types || []) : { node: el("div"), read: () => [] };
+  const period = document.createElement("input");
+  period.type = "number"; period.min = "1"; period.placeholder = "Review period in days (close_monitor)";
+  const note = document.createElement("input");
+  note.type = "text"; note.placeholder = "Note — free text supplements the codes, never replaces them";
+  const button = el("button", null, "Record disposition");
+  button.addEventListener("click", async () => {
+    if (!requireIdentity(msgBox)) return;
+    const body = {
+      analyst_id: identity.name, analyst_role: identity.role,
+      outcome: outcomeSel.value, rationale_codes: codes.read(),
+      record_id: record.record_id, record_version: record.version, note: note.value,
+    };
+    if (outcomeSel.value === "request_more_evidence") body.missing_evidence = missing.read();
+    if (period.value) body.review_period_days = Number(period.value);
+    button.disabled = true;
+    const result = await api("POST", "/cases/" + caseId + "/disposition", body);
+    if (result.ok) { showMsg(msgBox, "Disposition recorded — case is now " + result.data.case_status + ".", true); await reloadWorkspace(); }
+    else { showMsg(msgBox, "The gate refused this disposition: " + errText(result), false); button.disabled = false; }
+  });
+  form.append(el("label", "lbl", "Outcome"), outcomeSel, codesHost,
+    el("label", "lbl", "Missing evidence (request_more_evidence)"), missing.node,
+    el("label", "lbl", "Review period"), period,
+    el("label", "lbl", "Note"), note, el("div"), button, msgBox);
+  return form;
+}
+
+function confirmationForm(caseId, pending) {
+  const form = el("div", "form");
+  form.append(el("h3", null, "Confirm an adverse close — second person, L2 only"));
+  form.append(el("p", "stmt", "The disposition by " + pending.analyst_id + " parks here until a different analyst with the l2_reviewer role answers it. Self-confirmation is refused by the gate."));
+  const msgBox = el("div");
+  const outcomeSel = selectOf(VOCAB ? VOCAB.confirmations.outcomes : ["confirmed", "declined"], "confirmed");
+  const note = document.createElement("input");
+  note.type = "text"; note.placeholder = "Note (optional)";
+  const button = el("button", null, "Answer the confirmation");
+  button.addEventListener("click", async () => {
+    if (!requireIdentity(msgBox)) return;
+    button.disabled = true;
+    const result = await api("POST", "/cases/" + caseId + "/disposition/confirmation",
+      { confirmer_id: identity.name, confirmer_role: identity.role, outcome: outcomeSel.value, note: note.value });
+    if (result.ok) { showMsg(msgBox, "Confirmation recorded — case is now " + result.data.case_status + ".", true); await reloadWorkspace(); }
+    else { showMsg(msgBox, "The gate refused this confirmation: " + errText(result), false); button.disabled = false; }
+  });
+  form.append(el("label", "lbl", "Outcome"), outcomeSel, el("label", "lbl", "Note"), note, el("div"), button, msgBox);
+  return form;
+}
+
+function renderSar(ws, caseId, R) {
+  const section = panel(ws, "SAR narrative — drafted by the agent, approved by a second person");
+  if (!R.sar.ok) { section.append(el("p", "empty", errText(R.sar))); return; }
+  const current = R.sar.data.current;
+  if (!current) { section.append(el("p", "empty", "No SAR narrative on this case.")); return; }
+  section.append(kvTable([
+    ["Narrative", current.narrative_id + " · version " + current.version],
+    ["Status", current.status],
+    ["Drafted by", current.drafted_by + " · profile " + current.model_profile],
+    ["Over record", current.record_id + " v" + current.record_version],
+  ]));
+  const verification = current.verification;
+  if (verification) {
+    section.append(el("p", "stmt", "Citation verifier: " + (verification.all_verified
+      ? "every factual statement resolves to its evidence."
+      : "NOT fully verified — an unverified narrative cannot be approved.")));
+  }
+  for (const sec of current.sections || []) {
+    section.append(el("h3", null, sec.title));
+    for (const statement of sec.statements || []) {
+      section.append(el("p", "stmt", typeof statement === "string" ? statement : statement.text));
+      if (statement && statement.citations) {
+        for (const citation of statement.citations) section.append(el("div", "cite", "↳ " + citeText(citation)));
+      }
+    }
+  }
+  if (R.approval.ok && R.approval.data.current) {
+    const a = R.approval.data.current;
+    section.append(el("p", "stmt", "Approval standing: " + a.outcome + " by " + a.approver_id + " (" + a.approver_role + ")" +
+      ((a.reason_codes || []).length ? " — codes: " + a.reason_codes.join(", ") : "") + (a.note ? " — " + a.note : "")));
+  }
+  if (current.status !== "approved") section.append(sarApprovalForm(caseId));
+}
+
+function sarApprovalForm(caseId) {
+  const form = el("div", "form");
+  form.append(el("h3", null, "Decide the narrative — dual control"));
+  form.append(el("p", "stmt", "The approver may be neither the drafting analyst nor the analyst who dispositioned the case, and an unverified or stale narrative cannot be approved. Rejection requires coded reasons — they become the drafting worklist."));
+  const msgBox = el("div");
+  const outcomeSel = selectOf(VOCAB ? VOCAB.approvals.outcomes : ["approved", "rejected"], "approved");
+  const codes = checkGroup(VOCAB ? VOCAB.approvals.rejection_codes : []);
+  const note = document.createElement("input");
+  note.type = "text"; note.placeholder = "Note — supplements the codes";
+  const button = el("button", null, "Record the decision");
+  button.addEventListener("click", async () => {
+    if (!requireIdentity(msgBox)) return;
+    const body = { approver_id: identity.name, approver_role: identity.role, outcome: outcomeSel.value, note: note.value };
+    if (outcomeSel.value === "rejected") body.reason_codes = codes.read();
+    button.disabled = true;
+    const result = await api("POST", "/cases/" + caseId + "/sar/approve", body);
+    if (result.ok) { showMsg(msgBox, "Decision recorded — case is now " + result.data.case_status + ".", true); await reloadWorkspace(); }
+    else { showMsg(msgBox, "The approval gate refused: " + errText(result), false); button.disabled = false; }
+  });
+  form.append(el("label", "lbl", "Outcome"), outcomeSel,
+    el("label", "lbl", "Rejection codes (vocabulary " + (VOCAB ? VOCAB.approvals.rejection_version : "") + ")"), codes.node,
+    el("label", "lbl", "Note"), note, el("div"), button, msgBox);
+  return form;
+}
+
+function renderReviews(ws, caseId, R) {
+  const section = panel(ws, "Continuing-activity reviews");
+  if (!R.reviews.ok) { section.append(el("p", "empty", errText(R.reviews))); return; }
+  const data = R.reviews.data;
+  const current = data.current;
+  if (current) {
+    const card = el("div", "card");
+    card.append(el("h3", null, "Cycle " + current.cycle + " review — " + current.status));
+    card.append(kvTable([
+      ["Window since determination", current.determination_on + " · review due " + current.review_due_on + " · filing due " + current.filing_due_on],
+      ["Filed typology", current.filed_typology_label || "—"],
+      ["Continuation assessment", current.continuation_assessment],
+      ["Assessment basis", current.assessment_basis || "—"],
+      ["Window activity items", String((current.activity || []).length)],
+      ["Opened by", current.opened_by],
+    ]));
+    for (const item of current.activity || []) {
+      card.append(el("p", "stmt", "• " + item.kind + " — " + item.statement));
+    }
+    for (const q of current.open_questions || []) {
+      card.append(el("p", "stmt", "Open: " + (typeof q === "string" ? q : q.question)));
+    }
+    if (current.disposition) {
+      card.append(el("p", "stmt", "Dispositioned: " + current.disposition.outcome + " by " + current.disposition.analyst_id +
+        " — codes: " + (current.disposition.rationale_codes || []).join(", ")));
+    }
+    section.append(card);
+    if (!current.disposition) section.append(reviewDispositionForm(caseId, current));
+  } else {
+    section.append(el("p", "empty", "No review stands open for the current cycle."));
+    const hasClock = R.clock.ok && R.clock.data.continuing_activity;
+    if (hasClock) {
+      const msgBox = el("div");
+      const button = el("button", "ghost small", "Open the current cycle's review");
+      button.addEventListener("click", async () => {
+        if (!requireIdentity(msgBox)) return;
+        button.disabled = true;
+        const result = await api("POST", "/cases/" + caseId + "/continuing-reviews", { actor: identity.name });
+        if (result.ok) { showMsg(msgBox, "Review opened.", true); await reloadWorkspace(); }
+        else { showMsg(msgBox, errText(result), false); button.disabled = false; }
+      });
+      section.append(button, msgBox);
+    }
+  }
+  if (data.dispositions && data.dispositions.length) {
+    section.append(el("h3", null, "Cycle dispositions"));
+    section.append(dataTable(["Cycle review", "Outcome", "Analyst", "Codes", "Decided"],
+      data.dispositions.map((disp) => [disp.review_id, disp.outcome, disp.analyst_id,
+        (disp.rationale_codes || []).join(", "), disp.decided_at || disp.recorded_at || "—"])));
+  }
+}
+
+function reviewDispositionForm(caseId, review) {
+  const form = el("div", "form");
+  form.append(el("h3", null, "Disposition cycle " + review.cycle + " — the only act that answers the clock"));
+  const msgBox = el("div");
+  const outcomeSel = selectOf(VOCAB ? VOCAB.reviews.outcomes : ["file_continuing", "no_file_this_cycle"], "no_file_this_cycle");
+  const codesHost = el("div");
+  let codes = null;
+  const rebuildCodes = () => {
+    clear(codesHost);
+    let list = [];
+    if (VOCAB) {
+      list = outcomeSel.value === "file_continuing"
+        ? (VOCAB.reviews.file_continuing_codes || []).map((code) => [code, code])
+        : Object.entries(VOCAB.reviews.no_file_codes || {});
+    }
+    codes = checkGroup(list);
+    codesHost.append(el("label", "lbl", "Rationale codes"), codes.node);
+  };
+  outcomeSel.addEventListener("change", rebuildCodes);
+  rebuildCodes();
+  const note = document.createElement("input");
+  note.type = "text"; note.placeholder = "Note (optional)";
+  const button = el("button", null, "Record the cycle decision");
+  button.addEventListener("click", async () => {
+    if (!requireIdentity(msgBox)) return;
+    button.disabled = true;
+    const result = await api("POST", "/cases/" + caseId + "/continuing-reviews/" + review.review_id + "/disposition",
+      { analyst_id: identity.name, analyst_role: identity.role, outcome: outcomeSel.value, rationale_codes: codes.read(), note: note.value });
+    if (result.ok) { showMsg(msgBox, "Cycle decision recorded — case is now " + result.data.case_status + ".", true); await reloadWorkspace(); }
+    else { showMsg(msgBox, "The review gate refused: " + errText(result), false); button.disabled = false; }
+  });
+  form.append(el("label", "lbl", "Outcome"), outcomeSel, codesHost,
+    el("label", "lbl", "Note"), note, el("div"), button, msgBox);
+  return form;
+}
+
+function renderMedia(ws, R) {
+  const section = panel(ws, "Adverse media — scored in code, findings only");
+  if (!R.media.ok) { section.append(el("p", "empty", errText(R.media))); return; }
+  const list = R.media.data.assessments || [];
+  if (!list.length) { section.append(el("p", "empty", "No media assessments recorded.")); return; }
+  section.append(dataTable(["Article", "Subject", "Band", "Score", "Categories", "Published", "Age (days)", "Scorer"],
+    list.map((a) => [a.article_id, a.subject_name, a.band, String(a.score), (a.categories || []).join(", "),
+      a.published_on || "—", a.article_age_days === null || a.article_age_days === undefined ? "—" : String(a.article_age_days),
+      a.scorer_version])));
+  for (const a of list) {
+    if (a.band_basis) section.append(el("p", "stmt", a.article_id + " — " + a.band_basis));
+  }
+}
+
+function renderCosts(ws, R) {
+  const section = panel(ws, "Model cost ledger");
+  if (!R.costs.ok) { section.append(el("p", "empty", errText(R.costs))); return; }
+  const rollup = R.costs.data;
+  const rows = [
+    ["Total drafting cost", "$" + (rollup.cost_usd ?? "0")],
+    ["Calls", String(rollup.calls ?? (R.ledger.ok ? R.ledger.data.entries.length : 0))],
+    ["Tokens in / out", String(rollup.tokens_in ?? "—") + " / " + String(rollup.tokens_out ?? "—")],
+    ["Budget", rollup.budget_cap_usd ? "$" + rollup.budget_spent_usd + " of $" + rollup.budget_cap_usd + " cap" : "no cap configured"],
+    ["Budget refusals", String(rollup.budget_refusals ?? 0)],
+    ["Price table", rollup.price_table_version || "—"],
+  ];
+  section.append(kvTable(rows));
+  for (const [label, bucket] of [["By purpose", rollup.by_purpose], ["By profile", rollup.by_profile]]) {
+    if (!bucket) continue;
+    section.append(el("h3", null, label));
+    section.append(dataTable(["Key", "Calls", "Tokens in", "Tokens out", "Cost"],
+      Object.entries(bucket).map(([key, row]) => [key, String(row.calls), String(row.tokens_in), String(row.tokens_out), "$" + row.cost_usd])));
+  }
+  if (R.ledger.ok && R.ledger.data.entries.length) {
+    section.append(el("h3", null, "Calls"));
+    section.append(dataTable(["Called at", "Purpose", "Profile", "Model", "Tokens in", "Tokens out", "Cost"],
+      R.ledger.data.entries.map((e) => [e.called_at, e.purpose, e.profile_id, e.model,
+        String(e.tokens_in), String(e.tokens_out), "$" + e.cost_usd])));
+  }
+}
+
+/* --- boot --------------------------------------------------------------- */
+async function boot() {
+  loadIdentity();
+  const results = await Promise.all([api("GET", "/vocabulary"), api("GET", "/alerts")]);
+  if (results[0].ok) VOCAB = results[0].data;
+  if (results[1].ok) for (const alert of results[1].data) ALERTS[alert.alert_id] = alert;
+  await loadQueue();
+}
+$("identity-save").addEventListener("click", saveIdentity);
+$("analyst-name").addEventListener("change", saveIdentity);
+$("analyst-role").addEventListener("change", saveIdentity);
+$("queue-sort").addEventListener("change", renderQueue);
+$("queue-filter").addEventListener("change", renderQueue);
+boot();
+</script>
+</body>
+</html>

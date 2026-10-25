@@ -31,6 +31,12 @@ and cost rollup (by purpose and by profile, with the budget
 position), and the portfolio's per-day, per-profile spend. No
 endpoint files a SAR — none exists; the blueprint ends at an
 approved, sealed case file.
+
+The analyst console (R14) is served at ``/console``: one static
+file, no build step, which reads and acts only through the
+routes above — it adds no write path of its own. ``/vocabulary``
+serves the coded vocabularies the console's gate forms are built
+from, so a form can only offer codes the gates will accept.
 """
 
 from __future__ import annotations
@@ -39,10 +45,20 @@ import base64
 import binascii
 import uuid
 from datetime import date
+from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+
+from .approval import REJECTION_CODES, REJECTION_VOCABULARY_VERSION
+from .dispositions import (
+    ANALYST_ROLES,
+    EVIDENCE_TYPES,
+    RATIONALE_CODES,
+    RATIONALE_VOCABULARY_VERSION,
+)
+from .reviews import REVIEW_NO_FILE_CODES, REVIEW_VOCABULARY_VERSION
 
 from .errors import (
     AlertNotFoundError,
@@ -108,6 +124,8 @@ from .sealing import verify_export_package
 from .wiring import Services, build_services
 
 logger = get_logger(__name__)
+
+_CONSOLE = Path(__file__).parent / "static" / "console.html"
 
 
 class IntakeRequest(BaseModel):
@@ -526,6 +544,50 @@ def create_app(services: Services | None = None) -> FastAPI:
                 "object_store": objects_ok,
             },
         )
+
+    # --- analyst console (R14): one static file, API-fed --------
+    @app.get("/console")
+    async def console():
+        """The analyst console: a single static HTML file (inline
+        CSS + vanilla JS, no build step, no external assets). It
+        renders everything as text and acts only through the
+        gated routes in this module."""
+        return FileResponse(_CONSOLE, media_type="text/html")
+
+    @app.get("/vocabulary")
+    async def vocabulary():
+        """The coded vocabularies the gate forms are built from —
+        read-only. A console form offers exactly these codes, so
+        what it can submit is what the gates will accept."""
+        return {
+            "dispositions": {
+                "version": RATIONALE_VOCABULARY_VERSION,
+                "outcomes": [o.value for o in DispositionOutcome],
+                "rationale_codes": {
+                    outcome.value: sorted(codes)
+                    for outcome, codes in RATIONALE_CODES.items()
+                },
+                "missing_evidence_types": sorted(EVIDENCE_TYPES),
+            },
+            "analyst_roles": sorted(ANALYST_ROLES),
+            "confirmations": {
+                "outcomes": [o.value for o in ConfirmationOutcome],
+            },
+            "approvals": {
+                "outcomes": [o.value for o in ApprovalOutcome],
+                "rejection_codes": sorted(REJECTION_CODES),
+                "rejection_version": REJECTION_VOCABULARY_VERSION,
+            },
+            "reviews": {
+                "outcomes": [o.value for o in ReviewOutcome],
+                "no_file_codes": dict(REVIEW_NO_FILE_CODES),
+                "no_file_version": REVIEW_VOCABULARY_VERSION,
+                "file_continuing_codes": sorted(
+                    RATIONALE_CODES[DispositionOutcome.ESCALATE_SAR]
+                ),
+                "file_continuing_version": RATIONALE_VOCABULARY_VERSION,
+            },
+        }
 
     @app.get("/alerts")
     async def list_alerts():
