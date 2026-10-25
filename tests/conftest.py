@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from aml_investigations.approval import SarApprovalService
 from aml_investigations.config import Settings
 from aml_investigations.dispositions import DispositionService
 from aml_investigations.evidence import EvidenceService
@@ -15,6 +16,7 @@ from aml_investigations.models import Alert
 from aml_investigations.object_store import LocalObjectStore
 from aml_investigations.sar import SarNarrativeService
 from aml_investigations.screening import ListScreeningFeed, ScreeningService
+from aml_investigations.sealing import CaseSealingService
 from aml_investigations.stores import InMemoryCaseStore
 from aml_investigations.transactions import ListRulePackFeed, ListTransactionFeed
 from aml_investigations.typologies import TypologyService
@@ -48,17 +50,39 @@ SEED_ALERTS = [
 def services(tmp_path: Path) -> Services:
     store = InMemoryCaseStore()
     objects = LocalObjectStore(tmp_path / "objects")
-    evidence = EvidenceService(store, objects)
+    evidence = EvidenceService(store, objects, seal_store=store)
     workflow = CaseWorkflow(store, screening_store=store)
     feed = ListAlertFeed(list(SEED_ALERTS))
     intake = IntakeService(store, feed, evidence)
-    screening = ScreeningService(store, store, evidence)
-    typologies = TypologyService(store, store, evidence)
+    screening = ScreeningService(store, store, evidence, seal_store=store)
+    typologies = TypologyService(store, store, evidence, seal_store=store)
     investigations = InvestigationService(
-        store, store, store, store, evidence, disposition_store=store
+        store,
+        store,
+        store,
+        store,
+        evidence,
+        disposition_store=store,
+        seal_store=store,
     )
-    dispositions = DispositionService(store, store, store, store, evidence, workflow)
-    sar = SarNarrativeService(store, store, store, store, evidence)
+    dispositions = DispositionService(
+        store, store, store, store, evidence, workflow, seal_store=store
+    )
+    sar = SarNarrativeService(
+        store,
+        store,
+        store,
+        store,
+        evidence,
+        approval_store=store,
+        seal_store=store,
+    )
+    approvals = SarApprovalService(
+        store, store, store, store, sar, evidence, workflow, seal_store=store
+    )
+    sealing = CaseSealingService(
+        store, store, store, store, store, evidence, store
+    )
     settings = Settings(
         database_url=None,
         sqlite_path=tmp_path / "aml.db",
@@ -88,4 +112,6 @@ def services(tmp_path: Path) -> Services:
         investigations=investigations,
         dispositions=dispositions,
         sar=sar,
+        approvals=approvals,
+        sealing=sealing,
     )

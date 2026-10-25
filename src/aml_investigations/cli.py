@@ -45,6 +45,33 @@ Usage:
     aml-agent verify-sar <case_id>  re-run the citation verifier
                                     over the current draft and show
                                     the verification record
+    aml-agent approve-sar <case_id> --approver ID --role ROLE
+              --outcome approved|rejected [--code CODE ...] [--note T]
+                                    the dual-control decision on the
+                                    verified narrative (R7): the
+                                    approver may be neither the
+                                    dispositioning analyst nor the
+                                    drafter; a rejection needs codes
+    aml-agent case-file <case_id>   show the case's custody state:
+                                    operative seal, seal history,
+                                    legal-hold state (R7)
+    aml-agent seal <case_id> --officer ID --role ROLE
+              [--purpose custody|archive]
+                                    seal a terminal case file (R7)
+    aml-agent unseal <case_id> --officer ID --role ROLE --code CODE
+              [--note TEXT]         lift the seal, with a coded
+                                    reason (R7)
+    aml-agent hold <case_id> --officer ID --role ROLE --code CODE
+              [--note TEXT]         place a legal hold (R7)
+    aml-agent release-hold <case_id> --officer ID --role ROLE
+              --code CODE [--note TEXT]
+                                    release a legal hold (R7)
+    aml-agent export <case_id> [--out FILE]
+                                    export the sealed case file as
+                                    one package (to FILE, or stdout)
+    aml-agent verify-export <file>  re-verify an exported package
+                                    end to end, offline; exit 1 when
+                                    anything in it fails to verify
 """
 
 from __future__ import annotations
@@ -124,6 +151,45 @@ def main(argv: list[str] | None = None) -> int:
     p_sar.add_argument("case_id")
     p_verify_sar = sub.add_parser("verify-sar")
     p_verify_sar.add_argument("case_id")
+    p_approve_sar = sub.add_parser("approve-sar")
+    p_approve_sar.add_argument("case_id")
+    p_approve_sar.add_argument("--approver", required=True)
+    p_approve_sar.add_argument("--role", required=True)
+    p_approve_sar.add_argument(
+        "--outcome", choices=["approved", "rejected"], required=True
+    )
+    p_approve_sar.add_argument("--code", action="append", default=[])
+    p_approve_sar.add_argument("--note", default="")
+    p_case_file = sub.add_parser("case-file")
+    p_case_file.add_argument("case_id")
+    p_seal = sub.add_parser("seal")
+    p_seal.add_argument("case_id")
+    p_seal.add_argument("--officer", required=True)
+    p_seal.add_argument("--role", required=True)
+    p_seal.add_argument("--purpose", default="custody")
+    p_unseal = sub.add_parser("unseal")
+    p_unseal.add_argument("case_id")
+    p_unseal.add_argument("--officer", required=True)
+    p_unseal.add_argument("--role", required=True)
+    p_unseal.add_argument("--code", required=True)
+    p_unseal.add_argument("--note", default="")
+    p_hold = sub.add_parser("hold")
+    p_hold.add_argument("case_id")
+    p_hold.add_argument("--officer", required=True)
+    p_hold.add_argument("--role", required=True)
+    p_hold.add_argument("--code", required=True)
+    p_hold.add_argument("--note", default="")
+    p_release_hold = sub.add_parser("release-hold")
+    p_release_hold.add_argument("case_id")
+    p_release_hold.add_argument("--officer", required=True)
+    p_release_hold.add_argument("--role", required=True)
+    p_release_hold.add_argument("--code", required=True)
+    p_release_hold.add_argument("--note", default="")
+    p_export = sub.add_parser("export")
+    p_export.add_argument("case_id")
+    p_export.add_argument("--out", default=None)
+    p_verify_export = sub.add_parser("verify-export")
+    p_verify_export.add_argument("file")
     args = parser.parse_args(argv)
 
     services = build_services()
@@ -383,6 +449,107 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "verify-sar":
             verification = services.sar.verify_narrative(args.case_id)
             print(json.dumps(verification.model_dump(mode="json"), indent=2))
+        elif args.command == "approve-sar":
+            from .models import ApprovalOutcome
+
+            approval = services.approvals.decide_narrative(
+                args.case_id,
+                approver_id=args.approver,
+                approver_role=args.role,
+                outcome=ApprovalOutcome(args.outcome),
+                reason_codes=args.code,
+                note=args.note,
+            )
+            print(
+                json.dumps(
+                    {
+                        "approval": services.approvals.view(approval),
+                        "case_status": services.store.get_case(
+                            args.case_id
+                        ).status.value,
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "case-file":
+            if services.store.get_case(args.case_id) is None:
+                print(f"case not found: {args.case_id}", file=sys.stderr)
+                return 1
+            print(
+                json.dumps(
+                    services.sealing.case_file_view(args.case_id),
+                    indent=2,
+                )
+            )
+        elif args.command == "seal":
+            seal = services.sealing.seal_case(
+                args.case_id,
+                officer_id=args.officer,
+                officer_role=args.role,
+                purpose=args.purpose,
+            )
+            print(
+                json.dumps(
+                    {"seal": services.sealing.view(seal)}, indent=2
+                )
+            )
+        elif args.command == "unseal":
+            unseal = services.sealing.unseal_case(
+                args.case_id,
+                officer_id=args.officer,
+                officer_role=args.role,
+                reason_code=args.code,
+                note=args.note,
+            )
+            print(json.dumps(unseal.model_dump(mode="json"), indent=2))
+        elif args.command == "hold":
+            event = services.sealing.place_hold(
+                args.case_id,
+                officer_id=args.officer,
+                officer_role=args.role,
+                reason_code=args.code,
+                note=args.note,
+            )
+            print(json.dumps(event.model_dump(mode="json"), indent=2))
+        elif args.command == "release-hold":
+            event = services.sealing.release_hold(
+                args.case_id,
+                officer_id=args.officer,
+                officer_role=args.role,
+                reason_code=args.code,
+                note=args.note,
+            )
+            print(json.dumps(event.model_dump(mode="json"), indent=2))
+        elif args.command == "export":
+            package = services.sealing.export_case_file(args.case_id)
+            rendered = json.dumps(package, indent=2)
+            if args.out:
+                from pathlib import Path
+
+                Path(args.out).write_text(rendered + "\n", encoding="utf-8")
+                print(
+                    json.dumps(
+                        {
+                            "exported": args.out,
+                            "case_id": args.case_id,
+                            "seal_id": package["seal"]["seal_id"],
+                            "items": len(package["items"]),
+                        }
+                    )
+                )
+            else:
+                print(rendered)
+        elif args.command == "verify-export":
+            from pathlib import Path
+
+            from .sealing import verify_export_package
+
+            package = json.loads(
+                Path(args.file).read_text(encoding="utf-8")
+            )
+            result = verify_export_package(package)
+            print(json.dumps(result.model_dump(mode="json"), indent=2))
+            return 0 if result.ok else 1
     except AmlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

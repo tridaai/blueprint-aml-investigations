@@ -29,7 +29,9 @@ from pydantic import BaseModel, Field
 from .errors import (
     AlertNotFoundError,
     AmlError,
+    ApprovalRefusedError,
     CaseNotFoundError,
+    CaseSealedError,
     DispositionRefusedError,
     DispositionRequiredError,
     EvidenceChainError,
@@ -44,6 +46,7 @@ from .errors import (
     RulePackNotFoundError,
     SarNarrativeRefusedError,
     ScreeningError,
+    SealingRefusedError,
     ScreeningPinRequiredError,
     SnapshotImmutableError,
     SnapshotNotFoundError,
@@ -57,6 +60,7 @@ from .logging_config import (
     request_id_var,
 )
 from .models import (
+    ApprovalOutcome,
     CaseStatus,
     ConfirmationOutcome,
     Disposition,
@@ -68,6 +72,7 @@ from .models import (
     ScreeningSubject,
     Transaction,
 )
+from .sealing import verify_export_package
 from .wiring import Services, build_services
 
 logger = get_logger(__name__)
@@ -172,6 +177,50 @@ class SarDraftRequest(BaseModel):
         "default; a live profile must be configured in the deployment "
         "and refuses loudly until it is.",
     )
+
+
+class SarApprovalRequest(BaseModel):
+    """The dual-control decision on a verified narrative (R7). The
+    service owns every refusal — approver identity, dual control,
+    coded rejection reasons — and names its reason."""
+
+    approver_id: str
+    approver_role: str
+    outcome: ApprovalOutcome
+    reason_codes: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class SealRequest(BaseModel):
+    """Seal a terminal case file (R7), naming the officer."""
+
+    officer_id: str
+    officer_role: str
+    purpose: str = "custody"
+
+
+class UnsealRequest(BaseModel):
+    """Lift a case file's seal (R7): named officer, coded reason."""
+
+    officer_id: str
+    officer_role: str
+    reason_code: str
+    note: str = ""
+
+
+class HoldRequest(BaseModel):
+    """Place a legal hold on a case (R7): named officer, coded reason."""
+
+    officer_id: str
+    officer_role: str
+    reason_code: str
+    note: str = ""
+
+
+class ExportVerifyRequest(BaseModel):
+    """An exported case-file package to re-verify offline (R7)."""
+
+    package: dict
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -281,6 +330,18 @@ def create_app(services: Services | None = None) -> FastAPI:
     @app.exception_handler(NarrativeNotFoundError)
     async def _narrative_not_found(_request: Request, exc: NarrativeNotFoundError):
         return _error(404, str(exc))
+
+    @app.exception_handler(ApprovalRefusedError)
+    async def _approval_refused(_request: Request, exc: ApprovalRefusedError):
+        return _error(422, str(exc))
+
+    @app.exception_handler(CaseSealedError)
+    async def _case_sealed(_request: Request, exc: CaseSealedError):
+        return _error(409, str(exc))
+
+    @app.exception_handler(SealingRefusedError)
+    async def _sealing_refused(_request: Request, exc: SealingRefusedError):
+        return _error(422, str(exc))
 
     @app.get("/health")
     async def health():
@@ -656,6 +717,123 @@ def create_app(services: Services | None = None) -> FastAPI:
                 else None
             ),
         }
+
+    # --- Dual-control approval (R7): the second person's decision --
+    @app.post("/cases/{case_id}/sar/approve", status_code=201)
+    async def approve_sar(case_id: str, payload: SarApprovalRequest):
+        case_id_var.set(case_id)
+        approval = services.approvals.decide_narrative(
+            case_id,
+            approver_id=payload.approver_id,
+            approver_role=payload.approver_role,
+            outcome=payload.outcome,
+            reason_codes=payload.reason_codes,
+            note=payload.note,
+        )
+        return {
+            "approval": services.approvals.view(approval),
+            "case_status": services.store.get_case(case_id).status.value,
+        }
+
+    @app.get("/cases/{case_id}/sar/approval")
+    async def get_sar_approval(case_id: str):
+        if services.store.get_case(case_id) is None:
+            raise CaseNotFoundError(case_id)
+        current = services.approvals.current_approval(case_id)
+        return {
+            "case_id": case_id,
+            "current": (
+                services.approvals.view(current)
+                if current is not None
+                else None
+            ),
+            "history": [
+                services.approvals.view(a)
+                for a in services.approvals.history(case_id)
+            ],
+        }
+
+    # --- Sealing, legal hold, export (R7): the custody layer -------
+    @app.post("/cases/{case_id}/seal", status_code=201)
+    async def seal_case(case_id: str, payload: SealRequest):
+        case_id_var.set(case_id)
+        seal = services.sealing.seal_case(
+            case_id,
+            officer_id=payload.officer_id,
+            officer_role=payload.officer_role,
+            purpose=payload.purpose,
+        )
+        return {"seal": services.sealing.view(seal)}
+
+    @app.post("/cases/{case_id}/unseal", status_code=201)
+    async def unseal_case(case_id: str, payload: UnsealRequest):
+        case_id_var.set(case_id)
+        unseal = services.sealing.unseal_case(
+            case_id,
+            officer_id=payload.officer_id,
+            officer_role=payload.officer_role,
+            reason_code=payload.reason_code,
+            note=payload.note,
+        )
+        return {"unseal": unseal.model_dump(mode="json")}
+
+    @app.get("/cases/{case_id}/seal")
+    async def get_seal(case_id: str):
+        return services.sealing.case_file_view(case_id)
+
+    @app.post("/cases/{case_id}/legal-hold", status_code=201)
+    async def place_hold(case_id: str, payload: HoldRequest):
+        case_id_var.set(case_id)
+        event = services.sealing.place_hold(
+            case_id,
+            officer_id=payload.officer_id,
+            officer_role=payload.officer_role,
+            reason_code=payload.reason_code,
+            note=payload.note,
+        )
+        return {"legal_hold": event.model_dump(mode="json")}
+
+    @app.post("/cases/{case_id}/legal-hold/release", status_code=201)
+    async def release_hold(case_id: str, payload: HoldRequest):
+        case_id_var.set(case_id)
+        event = services.sealing.release_hold(
+            case_id,
+            officer_id=payload.officer_id,
+            officer_role=payload.officer_role,
+            reason_code=payload.reason_code,
+            note=payload.note,
+        )
+        return {"legal_hold": event.model_dump(mode="json")}
+
+    @app.get("/cases/{case_id}/legal-hold")
+    async def get_hold(case_id: str):
+        if services.store.get_case(case_id) is None:
+            raise CaseNotFoundError(case_id)
+        return {
+            "case_id": case_id,
+            "on_hold": services.sealing.hold_in_force(case_id),
+            "events": [
+                e.model_dump(mode="json")
+                for e in services.sealing.hold_events(case_id)
+            ],
+        }
+
+    @app.get("/cases/{case_id}/export")
+    async def export_case(case_id: str):
+        package = services.sealing.export_case_file(case_id)
+        return JSONResponse(
+            content=package,
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="case-file-{case_id}.json"'
+                )
+            },
+        )
+
+    @app.post("/cases/export/verify")
+    async def verify_export(payload: ExportVerifyRequest):
+        result = verify_export_package(payload.package)
+        return {"verification": result.model_dump(mode="json")}
 
     @app.get("/queues/pending-confirmation")
     async def pending_confirmation_queue():

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .approval import SarApprovalService
 from .config import Settings, load_settings
 from .dispositions import DispositionService
 from .evidence import EvidenceService
@@ -28,6 +29,7 @@ from .ports import (
 )
 from .sar import SarNarrativeService
 from .screening import ReferenceScreeningFeed, ScreeningService
+from .sealing import CaseSealingService
 from .stores import SqlCaseStore
 from .transactions import ReferenceRulePackFeed, ReferenceTransactionFeed
 from .typologies import TypologyService
@@ -51,6 +53,8 @@ class Services:
     investigations: InvestigationService
     dispositions: DispositionService
     sar: SarNarrativeService
+    approvals: SarApprovalService
+    sealing: CaseSealingService
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -67,22 +71,42 @@ def build_services(settings: Settings | None = None) -> Services:
         )
     else:
         objects = LocalObjectStore(settings.object_store_dir)
-    evidence = EvidenceService(store, objects)
+    evidence = EvidenceService(store, objects, seal_store=store)
     workflow = CaseWorkflow(store, screening_store=store)
     alerts = ReferenceAlertFeed(settings.seed_alerts_path)
     intake = IntakeService(store, alerts, evidence)
-    screening = ScreeningService(store, store, evidence)
+    screening = ScreeningService(store, store, evidence, seal_store=store)
     screening_feed = ReferenceScreeningFeed(settings.screening_lists_path)
     transactions = ReferenceTransactionFeed(settings.transaction_streams_path)
-    typologies = TypologyService(store, store, evidence)
+    typologies = TypologyService(store, store, evidence, seal_store=store)
     rule_pack_feed = ReferenceRulePackFeed(settings.typology_rules_path)
     investigations = InvestigationService(
-        store, store, store, store, evidence, disposition_store=store
+        store,
+        store,
+        store,
+        store,
+        evidence,
+        disposition_store=store,
+        seal_store=store,
     )
     dispositions = DispositionService(
-        store, store, store, store, evidence, workflow
+        store, store, store, store, evidence, workflow, seal_store=store
     )
-    sar = SarNarrativeService(store, store, store, store, evidence)
+    sar = SarNarrativeService(
+        store,
+        store,
+        store,
+        store,
+        evidence,
+        approval_store=store,
+        seal_store=store,
+    )
+    approvals = SarApprovalService(
+        store, store, store, store, sar, evidence, workflow, seal_store=store
+    )
+    sealing = CaseSealingService(
+        store, store, store, store, store, evidence, store
+    )
     return Services(
         settings=settings,
         store=store,
@@ -99,4 +123,6 @@ def build_services(settings: Settings | None = None) -> Services:
         investigations=investigations,
         dispositions=dispositions,
         sar=sar,
+        approvals=approvals,
+        sealing=sealing,
     )
