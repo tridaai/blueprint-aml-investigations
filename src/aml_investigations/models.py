@@ -567,11 +567,12 @@ class InvestigationFinding(BaseModel):
         "e.g. 'typology:<finding_id>' — the version diff is computed over keys."
     )
     kind: str = Field(
-        description="typology | screening | alert | profile | prior_case | counter"
+        description="typology | screening | alert | profile | prior_case | "
+        "media | counter"
     )
     origin: str = Field(
         description="typology | screening | alert | profile | prior_case | "
-        "counter_search — where the finding's figures came from."
+        "media | counter_search — where the finding's figures came from."
     )
     statement: str
     citations: list[Citation] = Field(default_factory=list)
@@ -2004,3 +2005,224 @@ class SharedCounterparty(BaseModel):
     transaction_count: int = 0
     total_in: MoneyAmount = Decimal("0")
     total_out: MoneyAmount = Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# Adverse media (R12): the media port, similarity scoring in code
+# ---------------------------------------------------------------------------
+
+
+class MediaArticle(BaseModel):
+    """One article record as an adverse-media source returns it.
+
+    The blueprint's reference feed is a labelled stand-in corpus;
+    a production deployment wires a licensed news database behind
+    the same port (see ``ports.AdverseMediaSource``) — the record
+    shape is the feed's extraction, structured fields and all,
+    because the scorer (``media.py``) reads structure, not prose:
+    who the article names, the date of birth or age it attributes
+    to them, where it places them, what it says they do, and the
+    entities it associates with them. The body text is carried
+    verbatim — it is untrusted text (Law 7) and is quarantined
+    and fenced like every other untrusted text on the case.
+    """
+
+    article_id: str = Field(description="The feed's article identifier.")
+    headline: str
+    outlet: str = Field(description="The publishing outlet, as the feed names it.")
+    published_on: date
+    body_text: str = ""
+    subjects_named: list[str] = Field(
+        default_factory=list,
+        description="The people/entities the feed's extraction says "
+        "the article is about — the surfaces name matching runs over.",
+    )
+    jurisdiction: str = ""
+    locations: list[str] = Field(
+        default_factory=list,
+        description="Places the article associates with the subject.",
+    )
+    occupations: list[str] = Field(
+        default_factory=list,
+        description="Occupations/industries the article attributes "
+        "to the subject.",
+    )
+    subject_dob: date | None = Field(
+        default=None,
+        description="A date of birth the article states for the "
+        "named subject, when it states one.",
+    )
+    subject_age: int | None = Field(
+        default=None,
+        description="An age the article states for the named "
+        "subject (at publication), when it states one.",
+    )
+    identifiers: list[str] = Field(
+        default_factory=list,
+        description="Document/registration identifiers the article "
+        "states for the subject (entity reporting carries these).",
+    )
+    associated_entities: list[str] = Field(
+        default_factory=list,
+        description="Other entities the article associates with "
+        "the subject.",
+    )
+    source_note: str = Field(
+        default="",
+        description="Feed-side provenance note for the record.",
+    )
+
+
+class MediaBand(str, enum.Enum):
+    """An assessment's relevance band — is this article about the
+    case's subject, and how sure is the code of it?
+
+    ``namesake_cleared`` is R2's discipline carried into media: a
+    name match contradicted by the subject's date of birth (or
+    stated age) is a different person, recorded as cleared with
+    the contradiction named — never silently dropped, never
+    allowed to stand as a hit.
+    """
+
+    STRONG = "strong"
+    POSSIBLE = "possible"
+    NAMESAKE_CLEARED = "namesake_cleared"
+    IRRELEVANT = "irrelevant"
+
+
+class MediaNameMatch(BaseModel):
+    """The name-match leg of an assessment: the deterministic
+    matcher's verdict over the subject's name surfaces against
+    the article's named subjects (the screening matcher's rules,
+    reused — see ``screening.match_name``)."""
+
+    matched: bool
+    strength: str = Field(
+        description="exact | token_set | fuzzy | none — the "
+        "match rule family that fired."
+    )
+    score: float = Field(description="The matcher's score, 0..1.")
+    rule: str = Field(
+        default="",
+        description="The match rule that fired (exact_name, "
+        "name_token_set, name_token_subset, name_token_overlap), "
+        "or empty when nothing matched.",
+    )
+    subject_surface: str = Field(
+        default="",
+        description="The subject name/alias surface that matched.",
+    )
+    article_surface: str = Field(
+        default="",
+        description="The article's named-subject surface that matched.",
+    )
+
+
+class MediaSignal(BaseModel):
+    """One disambiguation signal's contribution to an assessment.
+
+    Every signal the scorer examines is recorded — supports,
+    contradicts, or absent — with its numeric contribution and
+    the facts it was read from, so the band is auditable signal
+    by signal rather than a score an analyst must take on trust.
+    """
+
+    signal: str = Field(
+        description="identifier | dob | age | geography | "
+        "occupation | associated_entities"
+    )
+    outcome: str = Field(description="supports | contradicts | absent")
+    contribution: float = Field(
+        description="The signal's signed contribution to the "
+        "similarity score (0 when absent)."
+    )
+    detail: str = Field(description="What was compared, in words.")
+
+
+class MediaCategoryMatch(BaseModel):
+    """One adverse category the taxonomy found in the article,
+    with the exact terms that matched — classification is a
+    keyword taxonomy in code (versioned data), never a model
+    judgement, and the matched terms are the proof."""
+
+    category: str = Field(
+        description="fraud | corruption | sanctions_evasion | "
+        "organised_crime | regulatory_action | other"
+    )
+    matched_terms: list[str] = Field(min_length=1)
+
+
+class MediaAssessment(BaseModel):
+    """One article assessed against one case's subject (R12).
+
+    The assessment is a finding artefact, nothing more: it is
+    stored append-only, captured on the case's hash chain (kind
+    ``media_assessment``), and cited by the investigation record
+    like any other finding input. It dispositions nothing, blocks
+    nothing, and changes no case state — a named analyst decides
+    what a strong match means for the case, exactly as with a
+    screening hit.
+
+    Everything the score rests on is pinned: the scorer and
+    taxonomy versions, the profile view the subject facts were
+    read from (``profile_id``/``profile_version`` — None when the
+    facts came from the case's alert payload because no view had
+    been assembled, with ``facts_basis`` saying which), and the
+    article's evidence position, so an assessment can always be
+    re-derived and checked against the exact inputs it used.
+    """
+
+    assessment_id: str = Field(default_factory=lambda: _new_id("med"))
+    case_id: str
+    customer_id: str
+    article_id: str
+    article_evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the adverse_media evidence item "
+        "holding the article on this case's chain.",
+    )
+    subject_name: str = Field(
+        description="The subject surface the article was "
+        "assessed against (the customer's primary recorded name)."
+    )
+    name_match: MediaNameMatch
+    signals: list[MediaSignal] = Field(default_factory=list)
+    categories: list[MediaCategoryMatch] = Field(default_factory=list)
+    score: float = Field(
+        description="Similarity score, 0..1: the name match "
+        "weighted with the signals' signed contributions, "
+        "computed in code."
+    )
+    band: MediaBand
+    band_basis: str = Field(
+        description="Why the band is what it is, in words — "
+        "including the contradiction, when one cleared a namesake."
+    )
+    published_on: date
+    article_age_days: int = Field(
+        description="as_of - published_on, in days — the "
+        "article's age at assessment, computed and shown."
+    )
+    as_of: date = Field(
+        description="The date the assessment was computed at — "
+        "passed in, never a wall-clock read inside the scoring."
+    )
+    scorer_version: str
+    taxonomy_version: str
+    profile_id: str | None = Field(
+        default=None,
+        description="The profile view the subject facts were "
+        "read from, when one was used.",
+    )
+    profile_version: int | None = None
+    facts_basis: str = Field(
+        description="profile_view | alert_payload — where the "
+        "subject facts came from."
+    )
+    assessed_by: str
+    assessed_at: datetime = Field(default_factory=_utcnow)
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the media_assessment evidence item "
+        "holding this record.",
+    )

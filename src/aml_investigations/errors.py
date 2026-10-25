@@ -334,3 +334,22 @@ class CustomerNotFoundError(ProfileError):
 class ProfileNotFoundError(ProfileError):
     """No profile view has been assembled (and stored) for the
     named customer yet."""
+
+
+class MediaError(AmlError):
+    """Base class for adverse-media (R12) failures."""
+
+
+class MediaRefusedError(MediaError):
+    """A media search was refused, with a machine-readable
+    reason: no_subject_facts (no name for the case's customer can
+    be derived from any stored artefact, so there is nothing to
+    search for). The refusal is audited before it is raised."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class MediaNotFoundError(MediaError):
+    """The named media assessment does not exist on the named case."""

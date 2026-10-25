@@ -26,6 +26,8 @@ from .models import (
     LegalHoldEvent,
     ListKind,
     ListSnapshot,
+    MediaArticle,
+    MediaAssessment,
     NarrativeVerification,
     ProfileView,
     RulePack,
@@ -399,3 +401,45 @@ class ProfileStore(Protocol):
     def latest_profile_view(
         self, customer_id: str
     ) -> ProfileView | None: ...
+
+
+@runtime_checkable
+class AdverseMediaSource(Protocol):
+    """The adverse-media feed, as a search port (R12).
+
+    A production deployment wires a **licensed news database**
+    behind this port — adverse media is a licensed product, and
+    no real source is connected in the blueprint. The reference
+    feed shipped in ``data/`` is a labelled stand-in corpus: its
+    articles are data for the scorer and the evals, never
+    presented as real reporting about real people.
+
+    ``search`` is a recall-oriented name query, exactly as a
+    vendor API behaves: it returns candidate articles that may
+    name the subject — including namesakes and loose matches.
+    Deciding which candidates are actually about the subject is
+    the scorer's job (in code, on the case), never the feed's.
+    """
+
+    def search(self, subject_name: str) -> list[MediaArticle]: ...
+
+
+@runtime_checkable
+class MediaStore(Protocol):
+    """Persistence for adverse-media assessments (R12).
+
+    Assessments are append-only: an assessment, once recorded,
+    is never updated or deleted. A re-assessment under a newer
+    scorer is a new record alongside the earlier one, so the
+    case always shows what it was assessed with, and when.
+    """
+
+    def add_assessment(
+        self, assessment: MediaAssessment
+    ) -> MediaAssessment: ...
+
+    def list_assessments(self, case_id: str) -> list[MediaAssessment]: ...
+
+    def get_assessment(
+        self, assessment_id: str
+    ) -> MediaAssessment | None: ...
