@@ -1761,3 +1761,246 @@ class ExportVerification(BaseModel):
     ok: bool = False
     items_checked: int = 0
     problems: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# KYC profile assembly + counterparty views (R11)
+# ---------------------------------------------------------------------------
+
+
+class IdentityFact(BaseModel):
+    """One identity fact about a customer, with its provenance.
+
+    A fact is never hand-entered into a profile view: it is read
+    out of a stored artefact, and it carries that artefact with it
+    — the source kind, the case it came from, and (where the source
+    is an evidence item) the item's chain position. Two sources
+    disagreeing about the same field produce two facts and an
+    :class:`IdentityConflict`; the assembly never merges, picks,
+    or averages them away.
+    """
+
+    field: str = Field(description="name | dob | identifier")
+    value: str = Field(
+        description="The value exactly as recorded at the source."
+    )
+    source_kind: str = Field(
+        description="alert_payload | screening — the stored artefact "
+        "this fact was read from."
+    )
+    source_case_id: str
+    source_ref: str = Field(
+        description="Human-readable pointer at the source, e.g. "
+        "'alert ALRT-2026-1001 raw payload' or 'screening hit hit-…'."
+    )
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the evidence item holding the source, "
+        "when the source is one (alert payload, screening result).",
+    )
+
+
+class IdentityConflict(BaseModel):
+    """A field on which the stored sources disagree.
+
+    The conflict is the finding: every distinct value stands with
+    its facts, flagged ``identity_conflict``, and no value is
+    promoted over another. An analyst resolves a conflict by
+    evidence arriving on a case — never by an edit here, because
+    this view is derived and has no edit path.
+    """
+
+    field: str
+    flag: str = "identity_conflict"
+    values: list[str] = Field(
+        description="Every distinct value on record for the field."
+    )
+    facts: list[IdentityFact] = Field(
+        description="The facts carrying those values, with sources."
+    )
+
+
+class ProfileAccount(BaseModel):
+    """One account in a customer profile view: the core-banking
+    facts (from the stored account profile) and the cases that
+    touched the account. An account a case names but no stored
+    profile covers stands with ``profile_present`` false — the
+    gap is named, not papered over."""
+
+    account_id: str
+    profile_present: bool
+    opened_on: date | None = None
+    account_type: str | None = None
+    expected_monthly_amount: MoneyAmount | None = None
+    expected_monthly_count: int | None = None
+    case_ids: list[str] = Field(default_factory=list)
+
+
+class ProfileCaseEntry(BaseModel):
+    """One case in a customer's history, as the profile states it:
+    where the case stands, what the analyst gate last decided on
+    it (the latest disposition record's outcome and its derived
+    standing), and its SAR outcome — filed, or a narrative
+    approved under dual control."""
+
+    case_id: str
+    alert_id: str
+    rule_id: str
+    severity: AlertSeverity
+    status: CaseStatus
+    detected_on: date
+    disposition_outcome: str | None = Field(
+        default=None,
+        description="The latest disposition record's coded outcome, "
+        "or None when the gate has not decided this case.",
+    )
+    disposition_standing: str | None = Field(
+        default=None,
+        description="The latest disposition's derived standing "
+        "(effective | pending_confirmation | confirmed | declined | "
+        "superseded), from the disposition service's derivation.",
+    )
+    filed_sar: bool = False
+    narrative_approved: bool = False
+
+
+class ProfileScreeningHit(BaseModel):
+    """One screening hit as the profile's screening history states
+    it — including cleared hits, whose ``cleared_reason`` is the
+    point: a namesake clearance is a fact about the customer that
+    later investigators must be able to see, with its reason."""
+
+    hit_id: str
+    subject_name: str
+    subject_role: str
+    entry_name: str
+    status: HitStatus
+    strength: str
+    basis: str
+    cleared_reason: str | None = None
+    status_reason: str | None = None
+
+
+class ProfileScreeningEntry(BaseModel):
+    """One (case, list, snapshot version) line of screening
+    history: the run that pinned it and every hit it produced."""
+
+    case_id: str
+    list_kind: ListKind
+    snapshot_version: str
+    run_id: str
+    screened_at: datetime
+    hits: list[ProfileScreeningHit] = Field(default_factory=list)
+
+
+class FreshnessEntry(BaseModel):
+    """One fact class's KYC freshness, against the versioned
+    freshness policy: when the class was last corroborated by a
+    stored artefact, and whether that is now stale. A class with
+    no corroboration at all stands with ``last_corroborated_on``
+    None and ``stale`` true — never corroborated is the stalest
+    state there is, and it is named like any other."""
+
+    fact_class: str = Field(
+        description="identity | account | screening | activity"
+    )
+    last_corroborated_on: date | None = None
+    stale: bool
+    limit_days: int
+    policy_version: str
+
+
+class ProfileView(BaseModel):
+    """A customer's assembled KYC profile (R11): a DERIVED
+    artefact, assembled in code from stored artefacts only.
+
+    Content-addressed: ``content_hash`` covers the derived facts
+    (identity facts and conflicts, accounts, case history,
+    screening history, freshness as computed at ``as_of``), and
+    ``profile_id`` derives from it — rebuilding over unchanged
+    inputs returns the stored view; changed inputs append the
+    next version, and no version is ever edited. Content is
+    monotonic in practice because every input is append-only:
+    cases, hits, transactions and dispositions are never deleted,
+    so a fact set, once superseded, does not recur.
+    """
+
+    profile_id: str = Field(description="Content-derived: prof-<hash>.")
+    customer_id: str
+    version: int = Field(ge=1)
+    content_hash: str
+    assembled_at: datetime = Field(default_factory=_utcnow)
+    as_of: date = Field(
+        description="The date freshness was computed at — an "
+        "assembly input, passed in, never a wall-clock read inside "
+        "the derivation."
+    )
+    freshness_policy_version: str
+    identity_facts: list[IdentityFact] = Field(default_factory=list)
+    identity_conflicts: list[IdentityConflict] = Field(default_factory=list)
+    accounts: list[ProfileAccount] = Field(default_factory=list)
+    case_history: list[ProfileCaseEntry] = Field(default_factory=list)
+    screening_history: list[ProfileScreeningEntry] = Field(default_factory=list)
+    freshness: list[FreshnessEntry] = Field(default_factory=list)
+    source_case_ids: list[str] = Field(
+        default_factory=list,
+        description="Every case the view was assembled from — the "
+        "input set the content hash covers.",
+    )
+
+
+class CounterpartyScreening(BaseModel):
+    """One screening hit naming a counterparty, wherever it sits:
+    the hit's case, list, snapshot version, and standing."""
+
+    case_id: str
+    hit_id: str
+    list_kind: ListKind
+    snapshot_version: str
+    status: HitStatus
+    entry_name: str
+
+
+class CounterpartyView(BaseModel):
+    """One counterparty, aggregated in code from stored
+    transactions across cases (Decimal end to end — Law 4).
+
+    ``name`` is the display form for composed artefacts: where
+    R10's quarantine fenced the name on any batch it rode in on,
+    the display carries the fence marker. ``name_raw`` is the
+    stored value, verbatim — storage is never touched by fencing.
+    A counterparty standing on more than one customer's cases is
+    the shared-counterparty network signal; ``customer_ids``
+    names them all.
+    """
+
+    name: str = Field(description="Display form (fenced where quarantined).")
+    name_raw: str = Field(description="The stored name, verbatim.")
+    total_in: MoneyAmount = Field(
+        description="Sum of credits from this counterparty (Decimal)."
+    )
+    total_out: MoneyAmount = Field(
+        description="Sum of debits to this counterparty (Decimal)."
+    )
+    transaction_count: int = 0
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
+    currencies: list[str] = Field(default_factory=list)
+    customer_ids: list[str] = Field(default_factory=list)
+    case_ids: list[str] = Field(default_factory=list)
+    account_ids: list[str] = Field(default_factory=list)
+    screening: list[CounterpartyScreening] = Field(default_factory=list)
+
+
+class SharedCounterparty(BaseModel):
+    """A counterparty appearing on more than one customer's cases
+    — the network signal, computed exactly: the counterparty, the
+    customers it links, and its aggregate footprint."""
+
+    name: str = Field(description="Display form (fenced where quarantined).")
+    name_raw: str
+    customer_ids: list[str] = Field(min_length=2)
+    case_ids: list[str] = Field(default_factory=list)
+    transaction_count: int = 0
+    total_in: MoneyAmount = Decimal("0")
+    total_out: MoneyAmount = Decimal("0")

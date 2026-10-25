@@ -320,3 +320,17 @@ class QuarantineRefusedError(QuarantineError):
 
 class QuarantineNotFoundError(QuarantineError):
     """The named quarantine record does not exist on this case."""
+
+
+class ProfileError(AmlError):
+    """Base class for R11 KYC profile assembly failures."""
+
+
+class CustomerNotFoundError(ProfileError):
+    """No case in the store belongs to the named customer, so
+    there is nothing to assemble a profile from."""
+
+
+class ProfileNotFoundError(ProfileError):
+    """No profile view has been assembled (and stored) for the
+    named customer yet."""

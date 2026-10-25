@@ -33,6 +33,7 @@ from .models import (
     ListKind,
     ListSnapshot,
     NarrativeVerification,
+    ProfileView,
     RulePack,
     SarApproval,
     SarNarrative,
@@ -70,6 +71,7 @@ class InMemoryCaseStore:
         self._hold_events: list[LegalHoldEvent] = []
         self._reviews: list[ContinuingReview] = []
         self._review_dispositions: list[ContinuingReviewDisposition] = []
+        self._profile_views: list[ProfileView] = []
         self._lock = threading.Lock()
 
     def ping(self) -> bool:
@@ -548,6 +550,30 @@ class InMemoryCaseStore:
                 key=lambda d: (d.decided_at, d.review_disposition_id),
             )
         ]
+
+    # -- KYC profile views (R11): append-only versions --------
+
+    def add_profile_view(self, view: ProfileView) -> ProfileView:
+        with self._lock:
+            self._profile_views.append(view.model_copy(deep=True))
+        return view
+
+    def list_profile_views(self, customer_id: str) -> list[ProfileView]:
+        views = [v for v in self._profile_views if v.customer_id == customer_id]
+        return [
+            v.model_copy(deep=True)
+            for v in sorted(views, key=lambda v: v.version)
+        ]
+
+    def get_profile_view(self, profile_id: str) -> ProfileView | None:
+        for view in self._profile_views:
+            if view.profile_id == profile_id:
+                return view.model_copy(deep=True)
+        return None
+
+    def latest_profile_view(self, customer_id: str) -> ProfileView | None:
+        views = self.list_profile_views(customer_id)
+        return views[-1] if views else None
 
 
 class SqlCaseStore:
@@ -1379,3 +1405,43 @@ class SqlCaseStore:
             ContinuingReviewDisposition.model_validate_json(r["payload"])
             for r in rows
         ]
+
+    # -- KYC profile views (R11): append-only versions --------
+
+    def add_profile_view(self, view: ProfileView) -> ProfileView:
+        self._execute(
+            "INSERT INTO profile_views (profile_id, customer_id,"
+            " version, assembled_at, payload) VALUES (?, ?, ?, ?, ?)",
+            (
+                view.profile_id,
+                view.customer_id,
+                view.version,
+                view.assembled_at.isoformat(),
+                view.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return view
+
+    def list_profile_views(self, customer_id: str) -> list[ProfileView]:
+        rows = self._fetchall(
+            "SELECT payload FROM profile_views WHERE customer_id = ?"
+            " ORDER BY version ASC",
+            (customer_id,),
+        )
+        return [ProfileView.model_validate_json(r["payload"]) for r in rows]
+
+    def get_profile_view(self, profile_id: str) -> ProfileView | None:
+        row = self._fetchone(
+            "SELECT payload FROM profile_views WHERE profile_id = ?",
+            (profile_id,),
+        )
+        return ProfileView.model_validate_json(row["payload"]) if row else None
+
+    def latest_profile_view(self, customer_id: str) -> ProfileView | None:
+        row = self._fetchone(
+            "SELECT payload FROM profile_views WHERE customer_id = ?"
+            " ORDER BY version DESC",
+            (customer_id,),
+        )
+        return ProfileView.model_validate_json(row["payload"]) if row else None

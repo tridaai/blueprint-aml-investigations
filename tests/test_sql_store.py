@@ -51,6 +51,14 @@ def test_migrations_are_idempotent(tmp_path):
     first = run_migrations(conn, REPO_ROOT / "migrations", "sqlite", "qmark")
     second = run_migrations(conn, REPO_ROOT / "migrations", "sqlite", "qmark")
     assert first == [
-        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"
+        "0001",
+        "0002",
+        "0003",
+        "0004",
+        "0005",
+        "0006",
+        "0007",
+        "0008",
+        "0009",
     ]
     assert second == []

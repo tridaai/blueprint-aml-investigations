@@ -27,6 +27,7 @@ from .models import (
     ListKind,
     ListSnapshot,
     NarrativeVerification,
+    ProfileView,
     RulePack,
     SarApproval,
     SarNarrative,
@@ -377,3 +378,24 @@ class ContinuingReviewStore(Protocol):
     def list_review_dispositions_for_customer(
         self, customer_id: str
     ) -> list[ContinuingReviewDisposition]: ...
+
+
+@runtime_checkable
+class ProfileStore(Protocol):
+    """Persistence for assembled KYC profile views (R11).
+
+    Views are append-only versions of a derived artefact: a new
+    assembly over changed inputs adds the next version; no version
+    is ever updated or deleted, and rebuilding over unchanged
+    inputs returns the stored view rather than storing a copy.
+    """
+
+    def add_profile_view(self, view: ProfileView) -> ProfileView: ...
+
+    def list_profile_views(self, customer_id: str) -> list[ProfileView]: ...
+
+    def get_profile_view(self, profile_id: str) -> ProfileView | None: ...
+
+    def latest_profile_view(
+        self, customer_id: str
+    ) -> ProfileView | None: ...
