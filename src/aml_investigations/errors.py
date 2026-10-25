@@ -353,3 +353,55 @@ class MediaRefusedError(MediaError):
 
 class MediaNotFoundError(MediaError):
     """The named media assessment does not exist on the named case."""
+
+
+class ModelGatewayError(AmlError):
+    """Base class for model gateway (R13) failures."""
+
+
+class ModelProfileConfigError(ModelGatewayError):
+    """The gateway configuration itself is invalid — refused at
+    load/wiring time, before any call: a duplicate profile id, a
+    live profile naming no endpoint, a profile whose model has no
+    price-table entry, a malformed or negative price. The gateway
+    is fail-closed about its own configuration: a deployment with
+    a broken profile table does not start, and a call is never
+    silently rerouted to a different profile to paper over it."""
+
+
+class UnknownModelProfileError(ModelGatewayError):
+    """A caller named a model profile the gateway does not hold.
+    Refused loudly — the gateway never substitutes another
+    profile for the one that was named."""
+
+
+class ModelBudgetExceededError(ModelGatewayError):
+    """A live-profile call was refused: the case's priced spend
+    reached the deployment's per-case budget cap.
+
+    The refusal happens before any transport is touched, and it
+    is recorded (ledger budget event + case audit + chain item)
+    before it is raised. The offline profile is not capped — it
+    costs nothing — and continuing a case offline after a refusal
+    is a normal, recorded path; the gateway itself never switches
+    profiles."""
+
+    def __init__(
+        self,
+        case_id: str,
+        profile_id: str,
+        cap: str,
+        spent: str,
+    ) -> None:
+        self.case_id = case_id
+        self.profile_id = profile_id
+        self.cap_usd = cap
+        self.spent_usd = spent
+        super().__init__(
+            f"model budget refused: case {case_id} has spent "
+            f"{spent} USD of priced model calls, reaching the "
+            f"per-case cap of {cap} USD; further live-profile "
+            f"calls ({profile_id}) are refused — the offline "
+            "profile remains available, and no profile is ever "
+            "switched silently"
+        )
