@@ -1,9 +1,11 @@
 """FastAPI surface for the AML investigations blueprint.
 
-Endpoints cover the intake -> case -> evidence spine (R1) and the
+Endpoints cover the intake -> case -> evidence spine (R1), the
 screening surface (R2): snapshot ingest, pinned screening runs, hit
-disposition. Investigation work (typologies, findings, SAR drafting)
-arrives in later rounds behind the same case/evidence model.
+disposition, and the typology surface (R3): rule-pack registration,
+evidence-backed transaction ingestion, engine runs, findings.
+Investigation narrative work (findings drafting, SAR) arrives in
+later rounds behind the same case/evidence model.
 """
 
 from __future__ import annotations
@@ -25,10 +27,15 @@ from .errors import (
     EvidenceNotFoundError,
     HitNotFoundError,
     IllegalTransitionError,
+    NoTransactionsError,
+    RulePackImmutableError,
+    RulePackNotFoundError,
     ScreeningError,
     ScreeningPinRequiredError,
     SnapshotImmutableError,
     SnapshotNotFoundError,
+    TransactionMismatchError,
+    TypologyError,
 )
 from .logging_config import (
     case_id_var,
@@ -42,7 +49,9 @@ from .models import (
     HitStatus,
     ListKind,
     ListSnapshot,
+    RulePack,
     ScreeningSubject,
+    Transaction,
 )
 from .wiring import Services, build_services
 
@@ -86,6 +95,18 @@ class HitStatusRequest(BaseModel):
     status: HitStatus
     actor: str = Field(min_length=1)
     reason: str = Field(min_length=1)
+
+
+class TransactionBatchRequest(BaseModel):
+    transactions: list[Transaction]
+    source_ref: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
+
+
+class TypologyRunRequest(BaseModel):
+    pack_id: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    actor: str = Field(min_length=1)
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -154,6 +175,26 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     @app.exception_handler(ScreeningError)
     async def _screening_error(_request: Request, exc: ScreeningError):
+        return _error(422, str(exc))
+
+    @app.exception_handler(RulePackImmutableError)
+    async def _pack_immutable(_request: Request, exc: RulePackImmutableError):
+        return _error(409, str(exc))
+
+    @app.exception_handler(RulePackNotFoundError)
+    async def _pack_not_found(_request: Request, exc: RulePackNotFoundError):
+        return _error(404, str(exc))
+
+    @app.exception_handler(NoTransactionsError)
+    async def _no_transactions(_request: Request, exc: NoTransactionsError):
+        return _error(422, str(exc))
+
+    @app.exception_handler(TransactionMismatchError)
+    async def _txn_mismatch(_request: Request, exc: TransactionMismatchError):
+        return _error(422, str(exc))
+
+    @app.exception_handler(TypologyError)
+    async def _typology_error(_request: Request, exc: TypologyError):
         return _error(422, str(exc))
 
     @app.get("/health")
@@ -311,6 +352,86 @@ def create_app(services: Services | None = None) -> FastAPI:
             reason=payload.reason,
         )
         return hit.model_dump(mode="json")
+
+    # --- typologies (R3, Law 4) -------------------------------------
+    @app.post("/typologies/rule-packs", status_code=201)
+    async def register_rule_pack(payload: RulePack):
+        pack = services.typologies.register_rule_pack(payload)
+        return pack.model_dump(mode="json")
+
+    @app.post("/typologies/rule-packs/register-feed", status_code=201)
+    async def register_rule_pack_feed():
+        packs = services.typologies.register_from_source(services.rule_pack_feed)
+        return [p.model_dump(mode="json") for p in packs]
+
+    @app.get("/typologies/rule-packs")
+    async def list_rule_packs():
+        return [
+            p.model_dump(mode="json") for p in services.store.list_rule_packs()
+        ]
+
+    @app.post("/cases/{case_id}/transactions/ingest-feed", status_code=201)
+    async def ingest_transactions_feed(case_id: str, actor: str = "core-banking-feed"):
+        case_id_var.set(case_id)
+        batch = services.typologies.ingest_from_source(
+            case_id, services.transactions, actor=actor
+        )
+        return batch.model_dump(mode="json")
+
+    @app.post("/cases/{case_id}/transactions", status_code=201)
+    async def ingest_transactions(case_id: str, payload: TransactionBatchRequest):
+        case_id_var.set(case_id)
+        batch = services.typologies.ingest_transactions(
+            case_id,
+            payload.transactions,
+            source_ref=payload.source_ref,
+            actor=payload.actor,
+        )
+        return batch.model_dump(mode="json")
+
+    @app.get("/cases/{case_id}/transactions")
+    async def list_transactions(case_id: str):
+        if services.store.get_case(case_id) is None:
+            raise CaseNotFoundError(case_id)
+        return {
+            "case_id": case_id,
+            "batches": [
+                b.model_dump(mode="json")
+                for b in services.store.list_transaction_batches(case_id)
+            ],
+            "transactions": [
+                t.model_dump(mode="json")
+                for t in services.store.list_transactions(case_id)
+            ],
+        }
+
+    @app.post("/cases/{case_id}/typologies/run", status_code=201)
+    async def run_typologies(case_id: str, payload: TypologyRunRequest):
+        case_id_var.set(case_id)
+        run = services.typologies.run_typologies(
+            case_id, payload.pack_id, payload.version, actor=payload.actor
+        )
+        findings = services.typologies.list_findings(case_id, run_id=run.run_id)
+        return {
+            "run": run.model_dump(mode="json"),
+            "findings": [f.model_dump(mode="json") for f in findings],
+        }
+
+    @app.get("/cases/{case_id}/typologies")
+    async def get_typologies(case_id: str):
+        if services.store.get_case(case_id) is None:
+            raise CaseNotFoundError(case_id)
+        return {
+            "case_id": case_id,
+            "runs": [
+                r.model_dump(mode="json")
+                for r in services.store.list_typology_runs(case_id)
+            ],
+            "findings": [
+                f.model_dump(mode="json")
+                for f in services.typologies.list_findings(case_id)
+            ],
+        }
 
     return app
 

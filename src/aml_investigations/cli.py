@@ -1,4 +1,4 @@
-"""Command-line entry point: intake, case inspection, screening.
+"""Command-line entry point: intake, case inspection, screening, typologies.
 
 Usage:
     aml-agent intake <alert_id>     open a case from a feed alert
@@ -9,6 +9,14 @@ Usage:
     aml-agent snapshots             list ingested snapshots
     aml-agent screen <case_id> --sanctions V [--pep V] [--adverse-media V]
                                     screen a case against a pinned set
+    aml-agent register-packs        register rule packs from the feed
+    aml-agent packs                 list registered rule packs
+    aml-agent ingest-transactions <case_id>
+                                    pull the case account's stream from
+                                    the transaction feed (evidence-backed)
+    aml-agent run-typologies <case_id> --pack ID --version V
+                                    run the typology engine over the case
+    aml-agent findings <case_id>    list a case's typology findings
 """
 
 from __future__ import annotations
@@ -40,6 +48,17 @@ def main(argv: list[str] | None = None) -> int:
     p_screen.add_argument("--pep", default=None)
     p_screen.add_argument("--adverse-media", default=None)
     p_screen.add_argument("--actor", default="screening-service")
+    sub.add_parser("register-packs")
+    sub.add_parser("packs")
+    p_ingest_txn = sub.add_parser("ingest-transactions")
+    p_ingest_txn.add_argument("case_id")
+    p_run_typo = sub.add_parser("run-typologies")
+    p_run_typo.add_argument("case_id")
+    p_run_typo.add_argument("--pack", required=True)
+    p_run_typo.add_argument("--version", required=True)
+    p_run_typo.add_argument("--actor", default="typology-service")
+    p_findings = sub.add_parser("findings")
+    p_findings.add_argument("case_id")
     args = parser.parse_args(argv)
 
     services = build_services()
@@ -110,6 +129,49 @@ def main(argv: list[str] | None = None) -> int:
                         "hits": [h.model_dump(mode="json") for h in hits],
                     },
                     indent=2,
+                )
+            )
+        elif args.command == "register-packs":
+            packs = services.typologies.register_from_source(services.rule_pack_feed)
+            print(json.dumps([p.model_dump(mode="json") for p in packs], indent=2))
+        elif args.command == "packs":
+            print(
+                json.dumps(
+                    [
+                        p.model_dump(mode="json")
+                        for p in services.store.list_rule_packs()
+                    ],
+                    indent=2,
+                )
+            )
+        elif args.command == "ingest-transactions":
+            batch = services.typologies.ingest_from_source(
+                args.case_id, services.transactions
+            )
+            print(json.dumps(batch.model_dump(mode="json"), indent=2))
+        elif args.command == "run-typologies":
+            run = services.typologies.run_typologies(
+                args.case_id, args.pack, args.version, actor=args.actor
+            )
+            findings = services.typologies.list_findings(
+                args.case_id, run_id=run.run_id
+            )
+            print(
+                json.dumps(
+                    {
+                        "run": run.model_dump(mode="json"),
+                        "findings": [
+                            f.model_dump(mode="json") for f in findings
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "findings":
+            findings = services.typologies.list_findings(args.case_id)
+            print(
+                json.dumps(
+                    [f.model_dump(mode="json") for f in findings], indent=2
                 )
             )
     except AmlError as exc:
