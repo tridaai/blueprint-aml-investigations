@@ -426,6 +426,83 @@ order mechanically:
   `sar_pending` before and after drafting; filing is not a state
   the blueprint reaches.
 
+## Dual-control approval + sealing/export (R7) — Laws 2 and 5, completed
+
+R6 produced a verified draft and stopped. R7 is where the file is
+decided and then put under custody:
+
+- **The approval gate (`approval.py`).** A narrative is decided
+  exactly once, by a named person with a coded role — anonymous and
+  system approvers are refused before anything else is read. Dual
+  control is mechanical, in both directions of Law 2: the approver
+  may not be the analyst who recorded the routing `escalate_sar`
+  disposition (`approver_is_dispositioner`) and may not be the
+  actor who drafted the narrative (`approver_is_drafter`). The
+  gate reads the narrative's derived standing from the drafting
+  service: only `verified` may be decided — a draft, a stale
+  narrative, or an already-decided version is refused with its
+  standing named. **Rejection is coded** from a versioned
+  vocabulary and returns the narrative to drafting standing (its
+  standing becomes `rejected`; the case stays in `sar_pending`;
+  the answer is a re-draft, the next version). An approval carries
+  no codes. On approval the service records the decision on the
+  hash chain (`sar_approval`) and drives the case along the
+  machine's `sar_pending → filed_sar` edge, minting the R1 closing
+  token from the routing disposition at the moment the closure
+  takes effect — the approval is the second person's act that lets
+  the analyst's recorded decision complete the file. Nothing is
+  transmitted anywhere: **no SAR is ever filed by this system.**
+- **Sealed state is derived, never stored.** The operative seal is
+  the latest seal (by chain position) that no later unseal lifts.
+  One helper — `evidence.operative_seal` — derives it, and one
+  guard — `evidence.ensure_case_mutable` — speaks for it: every
+  mutating service entry calls it (evidence intake, screening and
+  hit disposition, typology ingest and runs, investigation,
+  dispositions and confirmations, drafting, approval), and the
+  evidence funnel itself refuses as a backstop, so a path that
+  forgot its guard still cannot write to a sealed case. The only
+  writes a sealed case accepts are the sealing service's own
+  custody records, which pass an explicit flag through the funnel.
+- **Sealing (`sealing.py`).** Lawful only from a terminal state
+  (`closed`, `filed_sar`) and only by a named officer
+  (`senior_analyst` / `l2_reviewer` — custody is senior work).
+  Before certifying anything, sealing re-verifies the case's
+  whole evidence chain: a chain that does not verify cannot be
+  sealed. The **manifest** then lists every evidence item (seq,
+  kind, content hash, chain hash), the chain head, and the
+  operative artefacts pinned by id and version — current
+  investigation record, every disposition, current narrative, its
+  verification verdict, its approval — and the seal hash is taken
+  over the manifest's canonical JSON. The seal records the
+  retention posture on its face: the BSA five-year basis and the
+  computed retention date, plus the legal-hold state at seal time.
+- **Legal hold.** Placed and released by a named officer with
+  coded reasons, recorded on the chain like everything else; the
+  case row's hold flag is a projection of the latest event. A hold
+  in force refuses an **archive** seal (a custody seal still
+  lands, and states the hold). Retention here authorises no
+  destruction: **no purge path exists anywhere in the system** —
+  the hold is recorded so that if one were ever built, the bar
+  would already be a fact of the file, not a hope.
+- **Unsealing** is an officer's act with a coded reason, chained
+  the same way. It lifts the operative seal and nothing else: the
+  seal stays in the append-only history, a reseal is the next seal
+  version, and `seal_history` reads seals and unseals interleaved
+  in chain order.
+- **Export + offline verification.** `export_case_file` produces
+  one package (`harborline-case-file-export/1`): the case, the
+  operative seal, its manifest, the custody and hold history, the
+  audit trail, and the full content of exactly the items the
+  manifest certifies. `verify_export_package` is a pure function
+  over that package — no store, no network: it recomputes the
+  seal hash over the carried manifest, re-hashes every item's
+  content against the certified value, recomputes every chain
+  link up to the manifest's head, and refuses items the manifest
+  does not certify. Every failure names its item by seq; `ok` is
+  true only when there are none. The same check is exposed over
+  the API (`POST /cases/export/verify`) and the CLI
+  (`verify-export`, exit 1 on any failure).
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
@@ -443,7 +520,10 @@ migration 0003 added the typology tables (`rule_packs`,
 0005 added `dispositions` and `disposition_confirmations`
 (append-only gate records); migration 0006 added `sar_narratives`
 and `sar_narrative_verifications` (append-only draft versions and
-verifier runs).
+verifier runs); migration 0007 added `sar_approvals`, `case_seals`,
+`case_unseals`, and `legal_hold_events` (the approval gate's
+decisions and the custody layer's records — all append-only, with
+sealed state derived from the seal/unseal history, never stored).
 Later rounds add: LangGraph checkpointing on Postgres, pgvector for
 adverse-media similarity (R12), and the clock/scheduler tables (R8).
 
@@ -462,6 +542,8 @@ adverse-media similarity (R12), and the clock/scheduler tables (R8).
 | `InvestigationStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `DispositionStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `SarNarrativeStore` | PostgreSQL via migrations | SQLite file; in-memory |
+| `ApprovalStore` | PostgreSQL via migrations | SQLite file; in-memory |
+| `SealStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `NarrativeComposer` (model port) | hosted frontier profile (key wired per deployment) | deterministic offline composer |
 
 The model gateway (R13) and adverse media (R12) arrive as further
@@ -479,14 +561,20 @@ everything, untrusted input quarantined (Law 7).
    citations, verified in code — the drafting + citation verifier
    (R6) ✓: entry gates on the routing disposition, completeness
    gates, per-statement verdicts, derived standing with staleness;
-   the dual-control approval itself is R7.
+   the dual-control approval (R7) ✓: named second-person gate,
+   dispositioner and drafter barred mechanically, coded rejections,
+   the decision on the hash chain.
 3. Screening is version-pinned; new list versions trigger delta
    re-screening of open cases — snapshots, pins, delta flags, and
    the sanctions close-guard (R2) ✓
 4. The model never computes money; typologies are code — five
    deterministic checks over evidence-backed transactions, under
    immutable versioned rule packs (R3) ✓
-5. Evidence is immutable and hash-chained — evidence service (R1) ✓
+5. Evidence is immutable and hash-chained — evidence service (R1) ✓;
+   retention and legal hold first-class (R7) ✓: terminal case files
+   sealed under a certified manifest, read-only everywhere, legal
+   hold recorded on the chain and stated on the seal, export
+   verifiable offline — and no purge path anywhere.
 6. Regulatory clocks are code (SAR 30/60-day, continuing-activity
    90/120-day) — detection date stamped at intake (R1) ✓, clocks R8/R9.
 7. Prompt injection inside evidence is a case event, quarantined — R10.

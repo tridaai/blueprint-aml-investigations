@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R6 of 20)
+## What is built at this round (R7 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -168,10 +168,35 @@ docker compose up --build
   back to stale. The round ends at a verified draft: approval is a
   second person's act (R7), and **no SAR is ever filed by this
   system**.
+- **Dual-control approval + sealing/export (R7)** — the verified
+  narrative is decided by a second person, mechanically: the
+  approver may be neither the analyst who recorded the
+  `escalate_sar` disposition nor the actor who drafted the
+  narrative (either match is a named refusal, not a warning), and
+  only a narrative standing verified over the case's current
+  record can be decided at all. Approval completes the case file
+  (`filed_sar`); rejection requires coded reasons from a versioned
+  vocabulary and returns the narrative to drafting standing — the
+  answer to a rejection is a re-draft, never a second decision on
+  the same version. A named officer then **seals** a terminal case
+  file: the seal re-verifies the evidence chain, certifies a
+  manifest over every evidence item plus the operative artefacts
+  (record, dispositions, narrative, verification, approval) by id
+  and version, and makes the case read-only — every mutating path
+  refuses on it with the one named reason. The sealed file exports
+  as a single package that an offline verifier re-checks end to
+  end, naming any altered, dropped, or added item. Unsealing is an
+  officer's coded act; the seal history is append-only, and a
+  reseal is the next seal version. Legal hold is placed and
+  released the same way: it blocks archive seals, is stated on the
+  seal's retention metadata (the BSA five-year posture), and there
+  is no purge path anywhere in the system for it — or anything —
+  to unblock. Approval and sealing end at an approved, sealed case
+  file: **no SAR is ever filed by this system**.
 
-The rest of the investigation — dual-control narrative approval
-and sealing, regulatory clocks, continuing-activity reviews —
-lands in rounds R7–R9 per the round map in `docs/architecture.md`.
+The rest of the investigation — regulatory clocks,
+continuing-activity reviews, injection defences — lands in rounds
+R8–R10 per the round map in `docs/architecture.md`.
 
 ## Configuration
 
@@ -191,7 +216,7 @@ lands in rounds R7–R9 per the round map in `docs/architecture.md`.
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, API, SQL store
+make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 
@@ -211,7 +236,11 @@ investigation record accepted (0), sanctions-blocked closures
 accepted (0), self-confirmations accepted (0), free-text-only
 rationale accepted (0), stale dispositions left unflagged (0),
 superseded-record citations accepted (0), disposition positive
-paths failed (0).
+paths failed (0), SAR self-approvals accepted (0),
+dispositioner-approvals accepted (0), unverified or stale
+narrative approvals accepted (0), mutations of a sealed case
+accepted (0), tampered exports passing verification (0), and
+seals with an incomplete manifest accepted (0).
 
 ## Honest status
 
@@ -224,8 +253,9 @@ paths failed (0).
   defined behind the model port and not yet exercised — it refuses
   loudly until a key is wired.
 - No SAR is ever actually filed — the blueprint ends at an approved,
-  sealed case file. As of R6 the line stops one step earlier: a
-  verified narrative draft, awaiting the dual-control approval of R7.
+  sealed case file. As of R7 the line stops exactly there: a
+  narrative approved under dual control, its case file sealed and
+  exportable, the export verifiable offline.
 - The Docker image builds in CI-grade environments; the compose
   stack is the supported local full-stack path.
 
