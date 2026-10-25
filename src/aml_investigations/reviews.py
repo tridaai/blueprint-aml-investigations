@@ -353,12 +353,26 @@ class ContinuingReviewService:
     ) -> tuple[str, str]:
         """The coded continuation assessment, derived in code:
         from the filed typology's label, the current record's
-        typology findings, and whether those findings rest on
-        transactions posted inside the window."""
-        typology_findings = [
-            f for f in record.findings if f.origin == "typology"
-        ]
-        if not typology_findings:
+        typology findings — each record finding's key names its
+        typology and the transactions it rests on
+        (``typology:<id>:<txn,txn,...>``, the record's own
+        deterministic identity) — and whether those transactions
+        were posted inside the window."""
+        parsed: list[tuple[str, set[str]]] = []
+        for finding in record.findings:
+            if finding.origin != "typology" or not finding.key.startswith(
+                "typology:"
+            ):
+                continue
+            parts = finding.key.split(":", 2)
+            label = parts[1] if len(parts) > 1 else ""
+            txns = (
+                {t for t in parts[2].split(",") if t}
+                if len(parts) > 2
+                else set()
+            )
+            parsed.append((label, txns))
+        if not parsed:
             return (
                 ASSESSMENT_NO_ADVERSE,
                 "the current record carries no typology findings: "
@@ -366,16 +380,12 @@ class ContinuingReviewService:
                 f"'{record.hypothesis.label}' — no adverse pattern "
                 "was found in the window",
             )
-        window_findings = []
-        for finding in typology_findings:
-            cited_ids = {
-                citation.element.split(":", 1)[1]
-                for citation in finding.citations
-                if citation.element.startswith("transaction:")
-            }
-            if cited_ids & window_transaction_ids:
-                window_findings.append(finding)
-        if not window_findings:
+        window_labels = {
+            label
+            for label, txns in parsed
+            if txns & window_transaction_ids
+        }
+        if not window_labels:
             return (
                 ASSESSMENT_UNRELATED,
                 "the current record's typology findings rest "
@@ -384,8 +394,7 @@ class ContinuingReviewService:
                 "activity predates this cycle and is not window "
                 "activity",
             )
-        labels = {f.label for f in window_findings}
-        if filed_label in labels:
+        if filed_label in window_labels:
             return (
                 ASSESSMENT_CONTINUES,
                 f"a typology finding labelled '{filed_label}' "
@@ -396,9 +405,9 @@ class ContinuingReviewService:
         return (
             ASSESSMENT_NEW_PATTERN,
             "typology findings resting on window transactions "
-            f"are labelled {sorted(labels)} — an adverse pattern "
-            f"in the window, but not the filed '{filed_label}' "
-            "typology",
+            f"are labelled {sorted(window_labels)} — an adverse "
+            f"pattern in the window, but not the filed "
+            f"'{filed_label}' typology",
         )
 
     def _assemble(
@@ -551,13 +560,15 @@ class ContinuingReviewService:
             ):
                 if batch.evidence_seq is None:
                     continue
-                payload = json.loads(
+                entries = json.loads(
                     self._evidence.read_item_content(
                         case.case_id, batch.evidence_seq
                     )
                 )
-                for txn in payload.get("transactions", []):
-                    batch_seq[txn["transaction_id"]] = batch.evidence_seq
+                for entry in entries:
+                    batch_seq[entry["transaction_id"]] = (
+                        batch.evidence_seq
+                    )
             txn_citations = [
                 Citation(
                     evidence_seq=self._evidence_seq_for(
