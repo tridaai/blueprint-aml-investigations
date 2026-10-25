@@ -4,7 +4,7 @@
 #   make install     uv sync --extra dev
 #   make demo        one seeded alert end to end, offline (no keys)
 #   make test        pytest
-#   make evals       R1 eval gate, offline (in-memory stack)
+#   make evals       eval gate, offline (in-memory stack)
 #   make serve       the API on http://localhost:8000
 #
 # No uv? python3 -m venv .venv && source .venv/bin/activate, then:
