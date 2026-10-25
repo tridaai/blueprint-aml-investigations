@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from aml_investigations.approval import SarApprovalService
+from aml_investigations.clocks import RegulatoryClockService
 from aml_investigations.config import Settings
 from aml_investigations.dispositions import DispositionService
 from aml_investigations.evidence import EvidenceService
@@ -53,7 +54,10 @@ def services(tmp_path: Path) -> Services:
     evidence = EvidenceService(store, objects, seal_store=store)
     workflow = CaseWorkflow(store, screening_store=store)
     feed = ListAlertFeed(list(SEED_ALERTS))
-    intake = IntakeService(store, feed, evidence)
+    clocks = RegulatoryClockService(
+        store, store, store, evidence, approvals=store
+    )
+    intake = IntakeService(store, feed, evidence, clock_service=clocks)
     screening = ScreeningService(store, store, evidence, seal_store=store)
     typologies = TypologyService(store, store, evidence, seal_store=store)
     investigations = InvestigationService(
@@ -114,4 +118,5 @@ def services(tmp_path: Path) -> Services:
         sar=sar,
         approvals=approvals,
         sealing=sealing,
+        clocks=clocks,
     )
