@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R5 of 20)
+## What is built at this round (R6 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -145,11 +145,33 @@ docker compose up --build
   and confirmations sit on the evidence hash chain like everything
   else, and the confirmation and escalation work queues are read
   straight from the gate's records.
+- **SAR narrative drafting + citation verifier (R6)** — for a case
+  the gate has routed to `sar_pending`, the drafting service
+  assembles the SAR narrative from the current investigation
+  record: subject identification, activity summary, chronology,
+  amounts and instruments, branch facts where the evidence holds
+  them, and a "what remains unknown" section that must carry every
+  open question in the record. Drafting is refused — with the
+  reason named — unless the case stands in `sar_pending` on a
+  current `escalate_sar` disposition, the record identifies its
+  subject, and a typology finding carries a flagged total the
+  narrative can state (the drafting side never totals transactions
+  itself). Text is composed through the model port — the
+  deterministic offline composer by default; a live profile refuses
+  loudly until a key is wired. Then the **citation verifier**, in
+  code over the finished text, re-resolves every statement's
+  citations, figures, and asserted values against the cited
+  evidence: a statement that cannot be verified is named, and the
+  narrative cannot stand as verified while any statement fails.
+  Drafts are versioned artefacts on the hash chain with derived
+  standing — a verified narrative whose record is superseded drops
+  back to stale. The round ends at a verified draft: approval is a
+  second person's act (R7), and **no SAR is ever filed by this
+  system**.
 
-The rest of the investigation — SAR narrative + citation
-verification, dual-control narrative approval and sealing,
-regulatory clocks — lands in rounds R6–R9 per the round map in
-`docs/architecture.md`.
+The rest of the investigation — dual-control narrative approval
+and sealing, regulatory clocks, continuing-activity reviews —
+lands in rounds R7–R9 per the round map in `docs/architecture.md`.
 
 ## Configuration
 
@@ -169,7 +191,7 @@ regulatory clocks — lands in rounds R6–R9 per the round map in
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, API, SQL store
+make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 
@@ -197,12 +219,13 @@ paths failed (0).
   are licensed integrations, wired behind the screening port in R2.
 - The monitoring system is a port with a reference feed; no real
   core/monitoring vendor is connected.
-- Investigation narrative (R4) runs on the deterministic offline
-  composer; the live model profile is defined behind the model port
-  and not yet exercised — it refuses loudly until a key is wired.
-  Live-model SAR drafting (R6) follows the same pattern.
+- Investigation narrative (R4) and SAR narrative drafting (R6) run
+  on the deterministic offline composer; the live model profile is
+  defined behind the model port and not yet exercised — it refuses
+  loudly until a key is wired.
 - No SAR is ever actually filed — the blueprint ends at an approved,
-  sealed case file.
+  sealed case file. As of R6 the line stops one step earlier: a
+  verified narrative draft, awaiting the dual-control approval of R7.
 - The Docker image builds in CI-grade environments; the compose
   stack is the supported local full-stack path.
 

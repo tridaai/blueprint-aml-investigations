@@ -356,6 +356,76 @@ which moves exist. The work queues an analyst actually lives in —
 cases awaiting confirmation, cases escalated or SAR-pending — are
 read models over the same records (`GET /queues/...`).
 
+## SAR narrative drafting + citation verifier (R6) — Law 2, first half
+
+A case standing in `sar_pending` holds everything a SAR narrative
+needs and one thing it must not do without: the analyst's recorded
+decision to file. The drafting service (`sar.py`) enforces that
+order mechanically:
+
+- **Entry gates, all named.** Drafting is lawful only in
+  `sar_pending` (`case_not_sar_pending`); only over the case's
+  current investigation record; only when the case's latest
+  disposition is the `escalate_sar` that routed it
+  (`sar_disposition_missing`) and that disposition cites the
+  current record (`sar_disposition_not_current`). Two completeness
+  gates follow: the record must carry a **subject identification
+  basis** — a subject name plus a date of birth or recorded
+  identifier, from the alert payload's facts or a corroborated
+  screening hit (`subject_identification_missing`) — and at least
+  one typology finding must carry a **flagged total** the
+  narrative can state (`flagged_amounts_not_statable`; the
+  drafting side never totals transactions itself — Law 4).
+- **Composition through the model port.** Statements are produced
+  by the composers of `composer.py`: the deterministic offline
+  composer by default; the `hosted-frontier` profile is defined
+  behind the same port and refuses loudly until a key is wired —
+  no silent fallback, and nothing is stored when it refuses. A
+  statement either restates a cited finding verbatim or fills a
+  template with values read out of cited evidence elements; in
+  both shapes the port's figure gate re-checks the text against
+  the cited records before the statement may stand.
+- **Sections, in filing order.** Subject identification (alert
+  facts + the profile finding) · activity summary (the labelled
+  hypothesis, its supporting and counter findings, the screening
+  outcome) · chronology (the alert, then the typology findings in
+  window order) · amounts and instruments (one statement per
+  typology finding stating its computed total under its rule pack
+  id + version, the channels present, the cash fact) · branch and
+  office facts (only where branch-channel transactions are among
+  the cited evidence) · what remains unknown (one statement per
+  open question in the record — always present, even when the
+  record holds none).
+- **The citation verifier (the round's centrepiece).** A code act
+  over the finished narrative text, per statement: every citation
+  re-resolves through R4's `CitationResolver` — the same resolver,
+  deliberately not a second one; every figure must appear in the
+  cited records; every asserted value must appear in the cited
+  elements; every bound finding must exist in the cited record.
+  Narrative-level checks stand behind the per-statement ones:
+  required sections present, a statable flagged total carried,
+  and *every open question in the record carried in the unknowns
+  section* — a narrative that hides what is not known fails by
+  construction. Verdicts are stored per statement as their own
+  append-only record; `all_verified` is the only path to the
+  VERIFIED standing.
+- **Versioning and derived standing.** Drafts are append-only
+  versions, each pinning the record id + version and the routing
+  disposition id, each captured on the hash chain
+  (`sar_narrative`); verification runs are chained too
+  (`sar_narrative_verification`). Standing is derived, never
+  stored: **superseded** by a newer draft, **stale** when the
+  cited record has been superseded (a verified narrative drops
+  back — it cannot proceed to approval on a moved basis),
+  **verified** when the latest verification passes, **draft**
+  otherwise. Re-drafting over unchanged inputs returns the
+  standing draft.
+- **The boundary.** This round ends at a verified draft. The
+  narrative is never approved here (dual-control approval is R7)
+  and **no SAR is ever filed by this system** — the case stands in
+  `sar_pending` before and after drafting; filing is not a state
+  the blueprint reaches.
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
@@ -371,7 +441,9 @@ migration 0003 added the typology tables (`rule_packs`,
 `typology_runs`, `typology_findings`); migration 0004 added
 `investigation_records` (append-only record versions); migration
 0005 added `dispositions` and `disposition_confirmations`
-(append-only gate records).
+(append-only gate records); migration 0006 added `sar_narratives`
+and `sar_narrative_verifications` (append-only draft versions and
+verifier runs).
 Later rounds add: LangGraph checkpointing on Postgres, pgvector for
 adverse-media similarity (R12), and the clock/scheduler tables (R8).
 
@@ -389,6 +461,7 @@ adverse-media similarity (R12), and the clock/scheduler tables (R8).
 | `TypologyStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `InvestigationStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `DispositionStore` | PostgreSQL via migrations | SQLite file; in-memory |
+| `SarNarrativeStore` | PostgreSQL via migrations | SQLite file; in-memory |
 | `NarrativeComposer` (model port) | hosted frontier profile (key wired per deployment) | deterministic offline composer |
 
 The model gateway (R13) and adverse media (R12) arrive as further
@@ -403,7 +476,10 @@ everything, untrusted input quarantined (Law 7).
    staleness flagging, sanctions posture, dual control on adverse
    closures ✓
 2. SAR drafting is dual-control; narrative statements must resolve to
-   citations, verified in code — R6/R7.
+   citations, verified in code — the drafting + citation verifier
+   (R6) ✓: entry gates on the routing disposition, completeness
+   gates, per-statement verdicts, derived standing with staleness;
+   the dual-control approval itself is R7.
 3. Screening is version-pinned; new list versions trigger delta
    re-screening of open cases — snapshots, pins, delta flags, and
    the sanctions close-guard (R2) ✓
