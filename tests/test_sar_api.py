@@ -21,6 +21,7 @@ from aml_investigations.intake import IntakeService, ListAlertFeed
 from aml_investigations.investigation import InvestigationService
 from aml_investigations.models import Alert, RulePack
 from aml_investigations.object_store import LocalObjectStore
+from aml_investigations.profiles import ProfileService
 from aml_investigations.quarantine import QuarantineService
 from aml_investigations.reviews import ContinuingReviewService
 from aml_investigations.sar import SarNarrativeService
@@ -128,6 +129,16 @@ def services(tmp_path: Path) -> Services:
         seal_store=store,
         quarantine=quarantine,
     )
+    profiles = ProfileService(
+        store,
+        store,
+        store,
+        store,
+        evidence,
+        dispositions=dispositions,
+        approval_store=store,
+        quarantine=quarantine,
+    )
     settings = Settings(
         database_url=None,
         sqlite_path=tmp_path / "aml.db",
@@ -166,6 +177,7 @@ def services(tmp_path: Path) -> Services:
         clocks=clocks,
         reviews=reviews,
         quarantine=quarantine,
+        profiles=profiles,
     )
 
 
