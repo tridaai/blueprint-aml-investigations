@@ -39,12 +39,20 @@ Zero-tolerance counters:
   - figures outside the cited records accepted (R6)  must be 0
   - open questions hidden by a narrative (R6) ..... must be 0
   - stale narratives still standing verified (R6). must be 0
+  - SAR self-approvals accepted (R7) .............. must be 0
+  - dispositioner approvals accepted (R7) ......... must be 0
+  - unverified/stale narrative approvals (R7) ..... must be 0
+  - anonymous narrative approvals accepted (R7)... must be 0
+  - mutations of a sealed case accepted (R7) ...... must be 0
+  - tampered exports passing verification (R7) .... must be 0
+  - seals with an incomplete manifest accepted (R7) must be 0
 
 Exit code 0 iff the gate passes.
 """
 
 from __future__ import annotations
 
+import base64
 import sys
 import tempfile
 from datetime import date, datetime, time, timedelta, timezone  # noqa: E402
@@ -53,12 +61,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from aml_investigations.approval import SarApprovalService  # noqa: E402
 from aml_investigations.composer import numeric_tokens, tokens_of  # noqa: E402
 from aml_investigations.dispositions import (  # noqa: E402
     FLAG_DISPOSITION_STALE,
     DispositionService,
 )
 from aml_investigations.errors import (  # noqa: E402
+    ApprovalRefusedError,
+    CaseSealedError,
     DispositionRefusedError,
     IllegalTransitionError,
     InvestigationRefusedError,
@@ -66,6 +77,7 @@ from aml_investigations.errors import (  # noqa: E402
     RulePackImmutableError,
     SarNarrativeRefusedError,
     ScreeningPinRequiredError,
+    SealingRefusedError,
 )
 from aml_investigations.evidence import EvidenceService  # noqa: E402
 from aml_investigations.intake import (  # noqa: E402
@@ -80,6 +92,7 @@ from aml_investigations.investigation import (  # noqa: E402
 from aml_investigations.models import (  # noqa: E402
     AccountProfile,
     Alert,
+    ApprovalOutcome,
     CaseStatus,
     ConfirmationOutcome,
     Disposition,
@@ -96,6 +109,11 @@ from aml_investigations.sar import SarNarrativeService  # noqa: E402
 from aml_investigations.screening import (  # noqa: E402
     ReferenceScreeningFeed,
     ScreeningService,
+)
+from aml_investigations.sealing import (  # noqa: E402
+    CaseSealingService,
+    seal_hash_for,
+    verify_export_package,
 )
 from aml_investigations.stores import InMemoryCaseStore  # noqa: E402
 from aml_investigations.transactions import (  # noqa: E402
@@ -270,6 +288,17 @@ def main() -> int:
         "sar_open_questions_omitted": 0,
         "sar_stale_still_verified": 0,
         "sar_positive_paths_failed": 0,
+        # R7 approval + sealing counters
+        "approvals_recorded": 0,
+        "seals_recorded": 0,
+        "sar_self_approval_accepted": 0,
+        "sar_dispositioner_approval_accepted": 0,
+        "sar_unverified_approval_accepted": 0,
+        "sar_anonymous_approval_accepted": 0,
+        "sealed_case_mutations_accepted": 0,
+        "tampered_export_verified": 0,
+        "seal_incomplete_accepted": 0,
+        "r7_positive_paths_failed": 0,
     }
 
     store = InMemoryCaseStore()
@@ -1359,7 +1388,276 @@ def main() -> int:
     except Exception:
         counters["chains_failed"] += 1
 
-    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6 counters")
+    # -- Scenario 10 (R7): dual-control approval + sealing/export. ----
+    # The seed case stands in sar_pending at a verified narrative
+    # (Scenario 9). A stale narrative must not be decidable; the
+    # dispositioning analyst and the drafter must not approve; a
+    # second person approves, completing the case file (nothing is
+    # filed — the case reaches filed_sar and stops). A legal hold
+    # blocks the archive seal; the custody seal certifies every
+    # evidence item; the export verifies clean offline, a tampered
+    # export fails naming the item, and every mutating path refuses
+    # on the sealed case until an officer unseals it.
+    s_evidence7 = EvidenceService(
+        s_store, s_evidence._objects, seal_store=s_store
+    )
+    s_screening7 = ScreeningService(
+        s_store, s_store, s_evidence7, seal_store=s_store
+    )
+    s_typologies7 = TypologyService(
+        s_store, s_store, s_evidence7, seal_store=s_store
+    )
+    s_investigations7 = InvestigationService(
+        s_store, s_store, s_store, s_store, s_evidence7,
+        disposition_store=s_store, seal_store=s_store,
+    )
+    s_dispositions7 = DispositionService(
+        s_store, s_store, s_store, s_store, s_evidence7, s_workflow,
+        seal_store=s_store,
+    )
+    s_sar7 = SarNarrativeService(
+        s_store, s_store, s_store, s_store, s_evidence7,
+        approval_store=s_store, seal_store=s_store,
+    )
+    s_approvals = SarApprovalService(
+        s_store, s_store, s_store, s_store, s_sar7, s_evidence7,
+        s_workflow, seal_store=s_store,
+    )
+    s_sealing = CaseSealingService(
+        s_store, s_store, s_store, s_store, s_store, s_evidence7, s_store
+    )
+
+    # 10a: a stale narrative cannot be decided. New evidence
+    # supersedes the record narrative_v2 cites; the approval gate
+    # refuses it as unverified-standing before any identity check
+    # could pass it.
+    s_workflow.transition(shipped, CaseStatus.INVESTIGATING, actor="eval")
+    extra_seed7 = [
+        etxn(f"S2-R{i}", "ACCT-5001", date(2026, 11, 3) + timedelta(days=i),
+             "10000", channel="wire")
+        for i in range(8)
+    ]
+    s_typologies7.ingest_transactions(
+        shipped, extra_seed7,
+        source_ref="core-banking:ACCT-5001:delta-2", actor="eval-feed",
+    )
+    s_typologies7.run_typologies(
+        shipped, "harborline-typologies", "2026.10.1", actor="eval-runner"
+    )
+    shipped_v3 = s_investigations7.run_investigation(
+        shipped, actor="eval-analyst"
+    )
+    if shipped_v3.version != 3 or s_sar7.status_of(narrative_v2) != "stale":
+        counters["r7_positive_paths_failed"] += 1
+    try:
+        s_approvals.decide_narrative(
+            shipped,
+            approver_id="m.osei",
+            approver_role="senior_analyst",
+            outcome=ApprovalOutcome.APPROVED,
+        )
+        counters["sar_unverified_approval_accepted"] += 1
+    except ApprovalRefusedError:
+        pass
+    s_workflow.transition(shipped, CaseStatus.AWAITING_ANALYST, actor="eval")
+    s_dispositions7.record_disposition(
+        shipped,
+        analyst_id="e.okafor",
+        analyst_role="analyst",
+        outcome=DispositionOutcome.ESCALATE_SAR,
+        rationale_codes=["STRUCTURING_SUSPECTED"],
+        record_id=shipped_v3.record_id,
+        record_version=shipped_v3.version,
+    )
+    narrative_v3, verification_v3 = s_sar7.draft_narrative(
+        shipped, actor="eval"
+    )
+    if (
+        not verification_v3.all_verified
+        or s_sar7.status_of(narrative_v3) != "verified"
+        or s_store.get_case(shipped).status is not CaseStatus.SAR_PENDING
+    ):
+        counters["r7_positive_paths_failed"] += 1
+
+    # 10b: dual control. The dispositioning analyst (e.okafor) and
+    # the drafter (eval) are refused by name; an anonymous approver
+    # is refused outright.
+    try:
+        s_approvals.decide_narrative(
+            shipped,
+            approver_id="e.okafor",
+            approver_role="senior_analyst",
+            outcome=ApprovalOutcome.APPROVED,
+        )
+        counters["sar_dispositioner_approval_accepted"] += 1
+    except ApprovalRefusedError as exc:
+        if exc.reason != "approver_is_dispositioner":
+            counters["r7_positive_paths_failed"] += 1
+    try:
+        s_approvals.decide_narrative(
+            shipped,
+            approver_id="eval",
+            approver_role="analyst",
+            outcome=ApprovalOutcome.APPROVED,
+        )
+        counters["sar_self_approval_accepted"] += 1
+    except ApprovalRefusedError as exc:
+        if exc.reason != "approver_is_drafter":
+            counters["r7_positive_paths_failed"] += 1
+    try:
+        s_approvals.decide_narrative(
+            shipped,
+            approver_id="",
+            approver_role="senior_analyst",
+            outcome=ApprovalOutcome.APPROVED,
+        )
+        counters["sar_anonymous_approval_accepted"] += 1
+    except ApprovalRefusedError:
+        pass
+
+    # 10c: a second person approves; the case file is complete.
+    s_approvals.decide_narrative(
+        shipped,
+        approver_id="m.osei",
+        approver_role="senior_analyst",
+        outcome=ApprovalOutcome.APPROVED,
+    )
+    counters["approvals_recorded"] += 1
+    if (
+        s_store.get_case(shipped).status is not CaseStatus.FILED_SAR
+        or s_sar7.status_of(narrative_v3) != "approved"
+    ):
+        counters["r7_positive_paths_failed"] += 1
+
+    # 10d: legal hold, then the seals. The hold blocks the archive
+    # seal; the custody seal certifies every evidence item.
+    s_sealing.place_hold(
+        shipped,
+        officer_id="o.reyes",
+        officer_role="l2_reviewer",
+        reason_code="LITIGATION_PENDING",
+    )
+    if not s_sealing.hold_in_force(shipped):
+        counters["r7_positive_paths_failed"] += 1
+    try:
+        s_sealing.seal_case(
+            shipped,
+            officer_id="o.reyes",
+            officer_role="l2_reviewer",
+            purpose="archive",
+        )
+        counters["seal_incomplete_accepted"] += 1
+    except SealingRefusedError:
+        pass
+    items_at_seal = len(s_store.list_evidence(shipped))
+    seal = s_sealing.seal_case(
+        shipped, officer_id="o.reyes", officer_role="l2_reviewer"
+    )
+    counters["seals_recorded"] += 1
+    if (
+        len(seal.manifest.items) != items_at_seal
+        or seal.seal_hash != seal_hash_for(seal.manifest)
+    ):
+        counters["seal_incomplete_accepted"] += 1
+
+    # 10e: the export verifies clean; a tampered export fails and
+    # names the altered item.
+    package = s_sealing.export_case_file(shipped)
+    clean = verify_export_package(package)
+    if not clean.ok or clean.items_checked != items_at_seal:
+        counters["r7_positive_paths_failed"] += 1
+    forged = dict(package)
+    forged_items = [dict(i) for i in package["items"]]
+    forged_items[1] = dict(
+        forged_items[1],
+        content_b64=base64.b64encode(b"forged content").decode("ascii"),
+    )
+    forged["items"] = forged_items
+    tampered = verify_export_package(forged)
+    if tampered.ok or not any(
+        f"seq {forged_items[1]['seq']}" in p for p in tampered.problems
+    ):
+        counters["tampered_export_verified"] += 1
+
+    # 10f: the sealed case refuses every mutating path.
+    def sealed_probe(fn) -> None:
+        try:
+            fn()
+            counters["sealed_case_mutations_accepted"] += 1
+        except CaseSealedError:
+            pass
+        except Exception:
+            counters["sealed_case_mutations_accepted"] += 1
+
+    sealed_probe(lambda: s_evidence7.add_item(
+        shipped, kind="analyst_note", content=b"late",
+        source_ref="eval", captured_by="analyst:e.okafor",
+    ))
+    sealed_probe(lambda: s_screening7.screen_case(
+        shipped, {ListKind.SANCTIONS: "2026.10.1"}, actor="eval",
+    ))
+    sealed_probe(lambda: s_typologies7.ingest_transactions(
+        shipped,
+        [etxn("S-LATE", "ACCT-5001", date(2026, 11, 20), "500",
+              channel="ach")],
+        source_ref="core-banking:late", actor="eval-feed",
+    ))
+    sealed_probe(lambda: s_typologies7.run_typologies(
+        shipped, "harborline-typologies", "2026.10.1", actor="eval",
+    ))
+    sealed_probe(lambda: s_investigations7.run_investigation(
+        shipped, actor="eval",
+    ))
+    sealed_probe(lambda: s_dispositions7.record_disposition(
+        shipped,
+        analyst_id="e.okafor",
+        analyst_role="analyst",
+        outcome=DispositionOutcome.CLOSE_NO_ACTION,
+        rationale_codes=["NO_SUSPICIOUS_ACTIVITY_IDENTIFIED"],
+        record_id="INV-x",
+        record_version=1,
+    ))
+    sealed_probe(lambda: s_sar7.draft_narrative(shipped, actor="eval"))
+    sealed_probe(lambda: s_approvals.decide_narrative(
+        shipped,
+        approver_id="m.osei",
+        approver_role="senior_analyst",
+        outcome=ApprovalOutcome.APPROVED,
+    ))
+
+    # 10g: release, unseal, reseal — the custody history keeps all
+    # of it, in order, and the reseal is version 2.
+    s_sealing.release_hold(
+        shipped,
+        officer_id="o.reyes",
+        officer_role="l2_reviewer",
+        reason_code="MATTER_RESOLVED",
+    )
+    s_sealing.unseal_case(
+        shipped,
+        officer_id="o.reyes",
+        officer_role="l2_reviewer",
+        reason_code="INVESTIGATION_REOPENED",
+    )
+    if s_sealing.is_sealed(shipped):
+        counters["r7_positive_paths_failed"] += 1
+    reseal = s_sealing.seal_case(
+        shipped, officer_id="o.reyes", officer_role="l2_reviewer"
+    )
+    counters["seals_recorded"] += 1
+    history = s_sealing.seal_history(shipped)
+    if reseal.version != 2 or [h["record"] for h in history] != [
+        "seal",
+        "unseal",
+        "seal",
+    ]:
+        counters["r7_positive_paths_failed"] += 1
+    try:
+        s_evidence7.verify_chain(shipped)
+    except Exception:
+        counters["chains_failed"] += 1
+
+    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7 counters")
     for key, value in counters.items():
         print(f"  {key}: {value}")
     zero_tolerance = [
@@ -1400,6 +1698,14 @@ def main() -> int:
         "sar_open_questions_omitted",
         "sar_stale_still_verified",
         "sar_positive_paths_failed",
+        "sar_self_approval_accepted",
+        "sar_dispositioner_approval_accepted",
+        "sar_unverified_approval_accepted",
+        "sar_anonymous_approval_accepted",
+        "sealed_case_mutations_accepted",
+        "tampered_export_verified",
+        "seal_incomplete_accepted",
+        "r7_positive_paths_failed",
     ]
     passed = all(counters[k] == 0 for k in zero_tolerance) and counters["cases_opened"] == len(ALERTS)
     print("GATE: PASS" if passed else "GATE: FAIL")
