@@ -11,6 +11,7 @@ from aml_investigations.evidence import EvidenceService
 from aml_investigations.intake import IntakeService, ListAlertFeed
 from aml_investigations.models import Alert
 from aml_investigations.object_store import LocalObjectStore
+from aml_investigations.screening import ListScreeningFeed, ScreeningService
 from aml_investigations.stores import InMemoryCaseStore
 from aml_investigations.wiring import Services
 from aml_investigations.workflow import CaseWorkflow
@@ -43,9 +44,10 @@ def services(tmp_path: Path) -> Services:
     store = InMemoryCaseStore()
     objects = LocalObjectStore(tmp_path / "objects")
     evidence = EvidenceService(store, objects)
-    workflow = CaseWorkflow(store)
+    workflow = CaseWorkflow(store, screening_store=store)
     feed = ListAlertFeed(list(SEED_ALERTS))
     intake = IntakeService(store, feed, evidence)
+    screening = ScreeningService(store, store, evidence)
     settings = Settings(
         database_url=None,
         sqlite_path=tmp_path / "aml.db",
@@ -54,6 +56,7 @@ def services(tmp_path: Path) -> Services:
         s3_endpoint_url=None,
         s3_bucket="aml-evidence",
         seed_alerts_path=tmp_path / "seed.json",
+        screening_lists_path=tmp_path / "lists.json",
         log_level="INFO",
     )
     return Services(
@@ -64,4 +67,6 @@ def services(tmp_path: Path) -> Services:
         workflow=workflow,
         alerts=feed,
         intake=intake,
+        screening=screening,
+        screening_feed=ListScreeningFeed([]),
     )
