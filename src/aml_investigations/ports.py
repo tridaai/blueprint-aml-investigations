@@ -28,6 +28,8 @@ from .models import (
     ListSnapshot,
     MediaArticle,
     MediaAssessment,
+    ModelBudgetEvent,
+    ModelCallEntry,
     NarrativeVerification,
     ProfileView,
     RulePack,
@@ -422,6 +424,31 @@ class AdverseMediaSource(Protocol):
     """
 
     def search(self, subject_name: str) -> list[MediaArticle]: ...
+
+
+@runtime_checkable
+class ModelLedgerStore(Protocol):
+    """Persistence for the model cost ledger (R13).
+
+    Both halves are append-only: a call entry, once recorded, is
+    never updated or deleted (a price-table change prices future
+    calls; it never reprices recorded ones), and a budget event is
+    a refusal on the record, not a state something can clear.
+    ``list_call_entries(None)`` is the portfolio read — every entry
+    across cases and the system scope.
+    """
+
+    def add_call_entry(self, entry: ModelCallEntry) -> ModelCallEntry: ...
+
+    def list_call_entries(
+        self, case_id: str | None
+    ) -> list[ModelCallEntry]: ...
+
+    def add_budget_event(
+        self, event: ModelBudgetEvent
+    ) -> ModelBudgetEvent: ...
+
+    def list_budget_events(self, case_id: str) -> list[ModelBudgetEvent]: ...
 
 
 @runtime_checkable

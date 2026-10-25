@@ -33,6 +33,8 @@ from .models import (
     ListKind,
     ListSnapshot,
     MediaAssessment,
+    ModelBudgetEvent,
+    ModelCallEntry,
     NarrativeVerification,
     ProfileView,
     RulePack,
@@ -74,6 +76,8 @@ class InMemoryCaseStore:
         self._review_dispositions: list[ContinuingReviewDisposition] = []
         self._profile_views: list[ProfileView] = []
         self._media_assessments: list[MediaAssessment] = []
+        self._call_entries: list[ModelCallEntry] = []
+        self._budget_events: list[ModelBudgetEvent] = []
         self._lock = threading.Lock()
 
     def ping(self) -> bool:
@@ -600,6 +604,42 @@ class InMemoryCaseStore:
             if assessment.assessment_id == assessment_id:
                 return assessment.model_copy(deep=True)
         return None
+
+    # -- model cost ledger (R13): append-only --------
+
+    def add_call_entry(self, entry: ModelCallEntry) -> ModelCallEntry:
+        with self._lock:
+            self._call_entries.append(entry.model_copy(deep=True))
+        return entry
+
+    def list_call_entries(
+        self, case_id: str | None
+    ) -> list[ModelCallEntry]:
+        found = [
+            e
+            for e in self._call_entries
+            if case_id is None or e.case_id == case_id
+        ]
+        return [
+            e.model_copy(deep=True)
+            for e in sorted(found, key=lambda e: (e.called_at, e.entry_id))
+        ]
+
+    def add_budget_event(
+        self, event: ModelBudgetEvent
+    ) -> ModelBudgetEvent:
+        with self._lock:
+            self._budget_events.append(event.model_copy(deep=True))
+        return event
+
+    def list_budget_events(self, case_id: str) -> list[ModelBudgetEvent]:
+        found = [e for e in self._budget_events if e.case_id == case_id]
+        return [
+            e.model_copy(deep=True)
+            for e in sorted(
+                found, key=lambda e: (e.recorded_at, e.event_id)
+            )
+        ]
 
 
 class SqlCaseStore:
@@ -1515,3 +1555,73 @@ class SqlCaseStore:
             if row
             else None
         )
+
+    # -- model cost ledger (R13): append-only --------
+
+    def add_call_entry(self, entry: ModelCallEntry) -> ModelCallEntry:
+        self._execute(
+            "INSERT INTO model_call_ledger (entry_id, case_id,"
+            " purpose, profile_id, model, price_table_version,"
+            " called_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                entry.entry_id,
+                entry.case_id,
+                entry.purpose,
+                entry.profile_id,
+                entry.model,
+                entry.price_table_version,
+                entry.called_at.isoformat(),
+                entry.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return entry
+
+    def list_call_entries(
+        self, case_id: str | None
+    ) -> list[ModelCallEntry]:
+        if case_id is None:
+            rows = self._fetchall(
+                "SELECT payload FROM model_call_ledger"
+                " ORDER BY called_at ASC, entry_id ASC"
+            )
+        else:
+            rows = self._fetchall(
+                "SELECT payload FROM model_call_ledger"
+                " WHERE case_id = ?"
+                " ORDER BY called_at ASC, entry_id ASC",
+                (case_id,),
+            )
+        return [
+            ModelCallEntry.model_validate_json(r["payload"]) for r in rows
+        ]
+
+    def add_budget_event(
+        self, event: ModelBudgetEvent
+    ) -> ModelBudgetEvent:
+        self._execute(
+            "INSERT INTO model_budget_events (event_id, case_id,"
+            " profile_id, recorded_at, payload)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                event.event_id,
+                event.case_id,
+                event.profile_id,
+                event.recorded_at.isoformat(),
+                event.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return event
+
+    def list_budget_events(self, case_id: str) -> list[ModelBudgetEvent]:
+        rows = self._fetchall(
+            "SELECT payload FROM model_budget_events"
+            " WHERE case_id = ?"
+            " ORDER BY recorded_at ASC, event_id ASC",
+            (case_id,),
+        )
+        return [
+            ModelBudgetEvent.model_validate_json(r["payload"])
+            for r in rows
+        ]
