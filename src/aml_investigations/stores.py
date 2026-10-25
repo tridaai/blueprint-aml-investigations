@@ -27,7 +27,9 @@ from .models import (
     InvestigationRecord,
     ListKind,
     ListSnapshot,
+    NarrativeVerification,
     RulePack,
+    SarNarrative,
     ScreeningHit,
     ScreeningRun,
     Transaction,
@@ -54,6 +56,8 @@ class InMemoryCaseStore:
         self._investigation_records: list[InvestigationRecord] = []
         self._dispositions: list[DispositionRecord] = []
         self._confirmations: list[DispositionConfirmation] = []
+        self._narratives: list[SarNarrative] = []
+        self._verifications: list[NarrativeVerification] = []
         self._lock = threading.Lock()
 
     def ping(self) -> bool:
@@ -337,6 +341,54 @@ class InMemoryCaseStore:
             if confirmation.disposition_id == disposition_id:
                 return confirmation.model_copy(deep=True)
         return None
+
+    # --- SAR narratives (R6): append-only drafts + verifications ----
+    def add_narrative(self, narrative: SarNarrative) -> SarNarrative:
+        with self._lock:
+            self._narratives.append(narrative.model_copy(deep=True))
+        return narrative
+
+    def list_narratives(self, case_id: str) -> list[SarNarrative]:
+        narratives = [n for n in self._narratives if n.case_id == case_id]
+        return [
+            n.model_copy(deep=True)
+            for n in sorted(narratives, key=lambda n: n.version)
+        ]
+
+    def get_narrative(self, narrative_id: str) -> SarNarrative | None:
+        for narrative in self._narratives:
+            if narrative.narrative_id == narrative_id:
+                return narrative.model_copy(deep=True)
+        return None
+
+    def add_verification(
+        self, verification: NarrativeVerification
+    ) -> NarrativeVerification:
+        with self._lock:
+            self._verifications.append(verification.model_copy(deep=True))
+        return verification
+
+    def list_verifications(
+        self, case_id: str
+    ) -> list[NarrativeVerification]:
+        runs = [v for v in self._verifications if v.case_id == case_id]
+        return [
+            v.model_copy(deep=True)
+            for v in sorted(runs, key=lambda v: (v.verified_at, v.verification_id))
+        ]
+
+    def get_verification_for(
+        self, narrative_id: str
+    ) -> NarrativeVerification | None:
+        runs = [
+            v for v in self._verifications if v.narrative_id == narrative_id
+        ]
+        if not runs:
+            return None
+        latest = sorted(
+            runs, key=lambda v: (v.verified_at, v.verification_id)
+        )[-1]
+        return latest.model_copy(deep=True)
 
 
 class SqlCaseStore:
@@ -858,6 +910,83 @@ class SqlCaseStore:
         )
         return (
             DispositionConfirmation.model_validate_json(row["payload"])
+            if row
+            else None
+        )
+
+    # --- SAR narratives (R6): append-only drafts + verifications ----
+    def add_narrative(self, narrative: SarNarrative) -> SarNarrative:
+        self._execute(
+            "INSERT INTO sar_narratives (narrative_id, case_id, version,"
+            " created_at, payload) VALUES (?, ?, ?, ?, ?)",
+            (
+                narrative.narrative_id,
+                narrative.case_id,
+                narrative.version,
+                narrative.created_at.isoformat(),
+                narrative.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return narrative
+
+    def list_narratives(self, case_id: str) -> list[SarNarrative]:
+        rows = self._fetchall(
+            "SELECT payload FROM sar_narratives WHERE case_id = ?"
+            " ORDER BY version ASC",
+            (case_id,),
+        )
+        return [SarNarrative.model_validate_json(r["payload"]) for r in rows]
+
+    def get_narrative(self, narrative_id: str) -> SarNarrative | None:
+        row = self._fetchone(
+            "SELECT payload FROM sar_narratives WHERE narrative_id = ?",
+            (narrative_id,),
+        )
+        return SarNarrative.model_validate_json(row["payload"]) if row else None
+
+    def add_verification(
+        self, verification: NarrativeVerification
+    ) -> NarrativeVerification:
+        self._execute(
+            "INSERT INTO sar_narrative_verifications (verification_id,"
+            " narrative_id, case_id, verified_at, all_verified, payload)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                verification.verification_id,
+                verification.narrative_id,
+                verification.case_id,
+                verification.verified_at.isoformat(),
+                1 if verification.all_verified else 0,
+                verification.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return verification
+
+    def list_verifications(
+        self, case_id: str
+    ) -> list[NarrativeVerification]:
+        rows = self._fetchall(
+            "SELECT payload FROM sar_narrative_verifications"
+            " WHERE case_id = ? ORDER BY verified_at ASC, verification_id ASC",
+            (case_id,),
+        )
+        return [
+            NarrativeVerification.model_validate_json(r["payload"]) for r in rows
+        ]
+
+    def get_verification_for(
+        self, narrative_id: str
+    ) -> NarrativeVerification | None:
+        row = self._fetchone(
+            "SELECT payload FROM sar_narrative_verifications"
+            " WHERE narrative_id = ?"
+            " ORDER BY verified_at DESC, verification_id DESC",
+            (narrative_id,),
+        )
+        return (
+            NarrativeVerification.model_validate_json(row["payload"])
             if row
             else None
         )
