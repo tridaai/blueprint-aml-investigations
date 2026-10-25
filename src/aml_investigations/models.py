@@ -838,3 +838,170 @@ class DispositionConfirmation(BaseModel):
         default=None,
         description="Seq of the disposition_confirmation evidence item.",
     )
+
+
+# ---------------------------------------------------------------------------
+# SAR narratives (R6): drafting + the citation verifier — Law 2
+# ---------------------------------------------------------------------------
+
+
+class NarrativeStatement(BaseModel):
+    """One factual statement in a SAR narrative draft.
+
+    A statement is text plus its proof, in the same discipline as
+    an investigation finding: ``citations`` name the evidence
+    elements it restates, ``finding_ids`` name the investigation
+    findings it is bound to, ``values`` are the exact slot values
+    the composer read out of the cited elements, and ``figures``
+    are the money/quantity figures it relies on — every one of them
+    must appear in the cited records. The citation verifier
+    (``sar.py``) re-checks all of this in code over the finished
+    narrative; a statement that fails is named, and the narrative
+    cannot be marked verified while any statement fails.
+    """
+
+    statement_id: str = Field(
+        description="Deterministic within the narrative, "
+        "e.g. 'amounts_and_instruments-2' — verdicts name it."
+    )
+    text: str
+    citations: list[Citation] = Field(default_factory=list)
+    finding_ids: list[str] = Field(
+        default_factory=list,
+        description="Investigation findings (of the cited record) "
+        "this statement restates. Every id must exist in that record.",
+    )
+    values: dict[str, str] = Field(
+        default_factory=dict,
+        description="Slot values the statement asserts, each read "
+        "from a cited element. The verifier requires every value "
+        "to appear in the cited records.",
+    )
+    figures: dict[str, str] = Field(
+        default_factory=dict,
+        description="Figures the statement relies on, as exact "
+        "decimal strings copied from the cited records — never "
+        "computed by the drafting model (Law 4).",
+    )
+
+
+class NarrativeSection(BaseModel):
+    """One named section of the narrative, in filing order."""
+
+    key: str = Field(
+        description="subject_identification | activity_summary | "
+        "chronology | amounts_and_instruments | branch_office_facts | "
+        "what_remains_unknown"
+    )
+    title: str
+    statements: list[NarrativeStatement] = Field(default_factory=list)
+
+
+class SarNarrative(BaseModel):
+    """One version of a case's SAR narrative draft (R6).
+
+    The narrative is assembled from the case's current investigation
+    record and the escalate_sar disposition that routed the case —
+    both pinned here by id and version, so the draft always says
+    what it was drafted from. Drafts are append-only versions: a
+    re-draft after new evidence is the next version and supersedes
+    this one in the case view; this one stays on the record. The
+    full draft is captured as a hash-chained evidence item (kind
+    ``sar_narrative``).
+
+    ``status`` is deliberately not a stored field: standing is
+    derived (see ``SarNarrativeService.status_of``) — superseded by
+    a newer draft, stale when the record it cites has been
+    superseded, verified when the citation verifier's latest
+    verdict passes every statement, draft otherwise. A narrative
+    in this round is never approved and never filed: approval is
+    R7's dual-control gate, and no SAR is ever filed by this system.
+    """
+
+    narrative_id: str = Field(default_factory=lambda: _new_id("sar"))
+    case_id: str
+    version: int = Field(ge=1)
+    record_id: str = Field(
+        description="The investigation record the narrative is drafted from."
+    )
+    record_version: int = Field(ge=1)
+    disposition_id: str = Field(
+        description="The escalate_sar disposition that routed the case "
+        "to SAR drafting. Drafting without one is refused."
+    )
+    model_profile: str = Field(
+        default="offline",
+        description="Composer profile that produced the text. "
+        "'offline' is the deterministic composer; a live profile is "
+        "a different composer behind the same port, never a silent swap.",
+    )
+    drafted_by: str = Field(
+        description="Actor that ran the drafting (a service or an "
+        "analyst running it by hand). Drafting is the agent's work; "
+        "deciding is not — no disposition rights attach to this field."
+    )
+    created_at: datetime = Field(default_factory=_utcnow)
+    supersedes_narrative_id: str | None = None
+    sections: list[NarrativeSection] = Field(default_factory=list)
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the sar_narrative evidence item holding this draft.",
+    )
+
+    def render_text(self) -> str:
+        """The narrative as plain text, sections in filing order —
+        the artefact a human reviewer reads (and R7's gate seals)."""
+        lines: list[str] = []
+        for section in self.sections:
+            lines.append(f"## {section.title}")
+            for statement in section.statements:
+                lines.append(statement.text)
+            lines.append("")
+        return "\n".join(lines).strip() + "\n"
+
+
+class StatementVerdict(BaseModel):
+    """The citation verifier's verdict on one narrative statement."""
+
+    statement_id: str
+    section_key: str
+    verified: bool
+    problems: list[str] = Field(
+        default_factory=list,
+        description="Every reason the statement failed, in words. "
+        "Empty iff verified.",
+    )
+
+
+class NarrativeVerification(BaseModel):
+    """One run of the citation verifier over one narrative draft.
+
+    Verification is its own stored record — per-statement verdicts,
+    plus narrative-level problems (a missing section, an open
+    question the draft failed to carry, no statable flagged total).
+    ``all_verified`` is true only when every statement verifies and
+    there are no narrative-level problems: that, and nothing else,
+    is what lets a narrative stand as VERIFIED — ready for R7's
+    dual-control approval, never approved or filed by R6 itself.
+    Verification runs are append-only; the latest run for a
+    narrative is the one its standing derives from. The record is
+    also captured as a hash-chained evidence item (kind
+    ``sar_narrative_verification``).
+    """
+
+    verification_id: str = Field(default_factory=lambda: _new_id("sarv"))
+    narrative_id: str
+    case_id: str
+    verified_at: datetime = Field(default_factory=_utcnow)
+    verifier: str = Field(
+        default="citation-verifier",
+        description="The verifying code's identity. Verification is "
+        "a code act, never a model judgement.",
+    )
+    all_verified: bool = False
+    statement_verdicts: list[StatementVerdict] = Field(default_factory=list)
+    narrative_problems: list[str] = Field(default_factory=list)
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the sar_narrative_verification evidence item.",
+    )
