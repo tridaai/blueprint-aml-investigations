@@ -79,6 +79,7 @@ from .models import (
     ListKind,
     OpenQuestion,
     PriorCaseRef,
+    ProfileView,
     RecordDiff,
     ScreeningHit,
     ScreeningRun,
@@ -407,6 +408,8 @@ class _State(TypedDict, total=False):
     alert_seq: int
     profile: AccountProfile | None
     profile_seq: int | None
+    profile_view: ProfileView | None
+    profile_view_seq: int | None
     screening_run: ScreeningRun | None
     screening_hits: list[ScreeningHit]
     typology_run: TypologyRun | None
@@ -615,6 +618,7 @@ class InvestigationService:
         disposition_store: DispositionStore | None = None,
         seal_store: SealStore | None = None,
         quarantine=None,
+        profile_service=None,
     ) -> None:
         self._store = store
         self._screening = screening_store
@@ -635,6 +639,13 @@ class InvestigationService:
         # record version flags any disposition that relied on an
         # older version as stale (the gate's DISPOSITION_STALE flag).
         self._dispositions = disposition_store
+        # R11: when a profile service is wired and a profile view
+        # has been assembled for the customer, assembly captures
+        # the view on this case's chain and the profile finding
+        # cites it — the record's profile facts then rest on the
+        # assembled, provenance-carrying view as well as the raw
+        # account profile. With no view stored, nothing changes.
+        self._profile_service = profile_service
         self._resolver = CitationResolver(store, evidence)
         builder = StateGraph(_State)
         builder.add_node("assemble", self._assemble)
@@ -841,6 +852,37 @@ class InvestigationService:
                     captured_by=actor,
                 )
                 profile_seq = captured_item.seq
+        # R11: the assembled KYC profile view (when one exists for
+        # this customer) joins the case's evidence the same way, so
+        # the record's profile facts can cite the view and every
+        # reader can trace them to the artefacts the view itself
+        # was assembled from. A view that has since been superseded
+        # is captured afresh; an unchanged view is reused.
+        profile_view: ProfileView | None = None
+        profile_view_seq: int | None = None
+        if self._profile_service is not None:
+            profile_view = self._profile_service.stored_view(case.customer_id)
+        if profile_view is not None:
+            view_json = profile_view.model_dump(mode="json")
+            captured_items = self._store.list_evidence(case_id)
+            for item in captured_items:
+                if item.kind != "customer_profile_view":
+                    continue
+                captured = json.loads(
+                    self._evidence.read_item_content(case_id, item.seq)
+                )
+                if captured == view_json:
+                    profile_view_seq = item.seq
+                    break
+            if profile_view_seq is None:
+                captured_item = self._evidence.add_item(
+                    case_id=case_id,
+                    kind="customer_profile_view",
+                    content=json.dumps(view_json, indent=2).encode("utf-8"),
+                    source_ref=f"kyc-profile:{profile_view.profile_id}",
+                    captured_by=actor,
+                )
+                profile_view_seq = captured_item.seq
         runs = self._screening.list_screening_runs(case_id)
         screening_run = (
             max(runs, key=lambda r: (r.run_at, r.run_id)) if runs else None
@@ -911,6 +953,8 @@ class InvestigationService:
             "alert_seq": alert_item.seq,
             "profile": profile,
             "profile_seq": profile_seq,
+            "profile_view": profile_view,
+            "profile_view_seq": profile_view_seq,
             "screening_run": screening_run,
             "screening_hits": screening_hits,
             "typology_run": typology_run,
@@ -1138,6 +1182,17 @@ class InvestigationService:
                     element="field:opened_on",
                 )
             ]
+            if state.get("profile_view_seq") is not None:
+                # The profile facts also rest on the assembled
+                # KYC view (R11) when one exists: the citation
+                # resolves to the view item on this case's chain,
+                # whose facts each carry their own provenance.
+                citations.append(
+                    Citation(
+                        evidence_seq=state["profile_view_seq"],
+                        element="field:customer_id",
+                    )
+                )
             if (
                 profile.expected_monthly_amount is not None
                 and profile.expected_monthly_count is not None

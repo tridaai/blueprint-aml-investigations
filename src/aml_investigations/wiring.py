@@ -28,6 +28,7 @@ from .ports import (
     ScreeningListSource,
     TransactionSource,
 )
+from .profiles import ProfileService
 from .quarantine import QuarantineService
 from .reviews import ContinuingReviewService
 from .sar import SarNarrativeService
@@ -61,6 +62,7 @@ class Services:
     clocks: RegulatoryClockService
     reviews: ContinuingReviewService
     quarantine: QuarantineService
+    profiles: ProfileService
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -101,16 +103,6 @@ def build_services(settings: Settings | None = None) -> Services:
         store, store, evidence, seal_store=store, quarantine=quarantine
     )
     rule_pack_feed = ReferenceRulePackFeed(settings.typology_rules_path)
-    investigations = InvestigationService(
-        store,
-        store,
-        store,
-        store,
-        evidence,
-        disposition_store=store,
-        seal_store=store,
-        quarantine=quarantine,
-    )
     dispositions = DispositionService(
         store, store, store, store, evidence, workflow, seal_store=store
     )
@@ -145,6 +137,31 @@ def build_services(settings: Settings | None = None) -> Services:
         seal_store=store,
         quarantine=quarantine,
     )
+    # R11: the profile service assembles KYC views from the same
+    # stores; the investigation assembly consumes a stored view
+    # for its profile facts when one exists, so the profile
+    # service is built first and handed to it.
+    profiles = ProfileService(
+        store,
+        store,
+        store,
+        store,
+        evidence,
+        dispositions=dispositions,
+        approval_store=store,
+        quarantine=quarantine,
+    )
+    investigations = InvestigationService(
+        store,
+        store,
+        store,
+        store,
+        evidence,
+        disposition_store=store,
+        seal_store=store,
+        quarantine=quarantine,
+        profile_service=profiles,
+    )
     return Services(
         settings=settings,
         store=store,
@@ -166,4 +183,5 @@ def build_services(settings: Settings | None = None) -> Services:
         clocks=clocks,
         reviews=reviews,
         quarantine=quarantine,
+        profiles=profiles,
     )
