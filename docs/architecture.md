@@ -208,6 +208,94 @@ inside the band every time, never aggregated — and any finding on a
 control account fails the gate outright (zero tolerance), alongside
 exact-set and exact-figure checks on every planted pattern.
 
+## Investigation graph (R4) — cited findings, hypothesis discipline
+
+The investigation graph turns what R1–R3 put on the case into an
+**investigation record**: the document an analyst actually works
+from. It is a second LangGraph graph — distinct from the case state
+machine — that runs over a case in `investigating`:
+
+    assemble -> draft -> counter_search -> compose -> verify -> persist
+
+**Assembly** gathers the alert payload, the latest screening run and
+its hits, the latest typology run and its findings, the stored
+transactions, the customer's prior cases, and the account profile.
+The profile joins the case's evidence on first assembly (kind
+`account_profile`) so that profile facts are citable like everything
+else; the run refuses, with a typed error, for a case that is not in
+`investigating`.
+
+**Findings are statements plus proof.** Every finding carries
+citations, and a citation addresses a *specific element* of a
+*specific evidence item*: `finding:<id>`, `transaction:<id>`,
+`hit:<id>`, `run:<id>` (an object inside the item's JSON, found by
+its id), or `field:<dotted.path>` (a field of a JSON payload). Prior
+cases are cited cross-case, with the case id named. A citation
+resolves only if the item exists *and* the element is inside it —
+a citation to a real item naming a non-existent element is exactly
+as refused as one to a missing item.
+
+**The record separates facts, hypothesis, and open questions.** The
+working hypothesis is chosen deterministically from the assembled
+picture (an open sanctions hit outranks typology patterns;
+structuring outranks the rest) and is labelled a hypothesis: it
+names the findings that support it and the findings that cut
+against it. Open questions each name the evidence type that would
+resolve them — an adverse hypothesis with no source-of-funds
+documentation on the file always carries that question.
+
+**The counter-evidence search is a graph step, not a label.** For
+the working hypothesis, named checks run over the stored records:
+for structuring, a regular-cadence check and a documented-expectation
+check over the in-band population *beyond the flagged cluster* (the
+innocent explanation for a cluster is that the same deposits recur
+on a documented cadence outside it); for velocity, a search of the
+account's own baseline for a comparable surge plus the same
+expectation test; for dormancy, the burst's size against the
+documented expectation; for rapid in-out, an established-relationship
+search on the counterparty; for a sanctions match, a namesake search
+over the case's screening history plus the hit's corroboration
+strength. Every check is recorded with its outcome — found, not
+found, or not applicable with the reason — and what it covered, so a
+record with zero counter-findings states what was searched. A check
+that finds counter-evidence produces its own finding, cited to the
+transactions or records it computed from.
+
+**Narrative text comes through the model port** (`composer.py`).
+The default `offline` profile is a deterministic stand-in composer:
+it renders statements from values code computed out of the cited
+records, and *refuses* a statement whose figures are not all in its
+inputs. The live `hosted-frontier` profile's interface is defined
+behind the same port and, until a deployment wires a key, selecting
+it is a loud refusal — never a silent fall-back to offline text
+under a live profile's name. The record names the profile that
+produced its text. The full gateway (routing, cost ledger) is R13.
+
+**The record gate is mechanical.** Before anything persists, the
+verify node re-resolves every citation from the store, checks that
+figures copied from source records appear in the cited records
+(figure provenance), checks that no statement carries an
+ungrounded figure, and checks the hypothesis discipline (support
+and counter ids name findings of the matching direction; a
+counter-search record with at least one check exists). Any failure
+raises and nothing is stored. The same gate is a public method —
+the eval suite poisons records with it (fake element in a real
+item, missing item, uncited finding, invented figure) and requires
+refusal every time.
+
+**Records are versioned evidence.** A record is stored as an
+`investigation_record` evidence item on the hash chain plus an
+append-only record row. Re-running over unchanged inputs is
+idempotent — an input fingerprint (alert hash, screening runs and
+hit states, typology runs and findings, the transaction fingerprint,
+prior-case states, source-of-funds presence) returns the existing
+record. New evidence produces the next version, which supersedes
+the previous in the case view while it stays on the chain; the diff
+between versions (findings added / removed / changed, computed over
+stable finding keys that name the pattern rather than a run's
+random ids, plus whether the hypothesis moved) is computed and
+stored on the new record.
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
@@ -220,7 +308,8 @@ recorded in `schema_migrations`. Migration 0002 added the screening
 tables (`list_snapshots`, `screening_runs`, `screening_hits`);
 migration 0003 added the typology tables (`rule_packs`,
 `account_profiles`, `transaction_batches`, `transactions`,
-`typology_runs`, `typology_findings`).
+`typology_runs`, `typology_findings`); migration 0004 added
+`investigation_records` (append-only record versions).
 Later rounds add: LangGraph checkpointing on Postgres, pgvector for
 adverse-media similarity (R12), and the clock/scheduler tables (R8).
 
@@ -236,6 +325,8 @@ adverse-media similarity (R12), and the clock/scheduler tables (R8).
 | `TransactionSource` | core-banking full-history stream | reference JSON feed |
 | `RulePackSource` | governed rule-pack distribution | reference JSON feed |
 | `TypologyStore` | PostgreSQL via migrations | SQLite file; in-memory |
+| `InvestigationStore` | PostgreSQL via migrations | SQLite file; in-memory |
+| `NarrativeComposer` (model port) | hosted frontier profile (key wired per deployment) | deterministic offline composer |
 
 The model gateway (R13) and adverse media (R12) arrive as further
 ports behind the same discipline: decisions in code, citations on

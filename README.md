@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R3 of 20)
+## What is built at this round (R4 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -101,11 +101,31 @@ docker compose up --build
   evidence is idempotent. The reference transaction feed ships the
   Harborline streams the seed alerts point at, planted patterns and
   clean controls included.
+- **Investigation graph (R4)** — a LangGraph graph
+  (assemble → draft → counter-search → compose → verify → persist)
+  works a case in `investigating` into a versioned investigation
+  record. Every finding is a statement plus citations that must
+  resolve to a specific element of a specific evidence item
+  (transaction, screening hit, typology finding, alert field,
+  profile fact, prior case) — a finding whose citations do not
+  resolve is refused at record time, mechanically. The record
+  separates facts, the working hypothesis (labelled, naming its
+  supporting *and* counter findings), and open questions (each
+  naming the evidence that would resolve it). The counter-evidence
+  search is a real step: named checks look for innocent explanations
+  in the data — a regular cadence or documented expectation beyond
+  the flagged cluster, an established counterparty, a cleared
+  namesake — and record what they found either way. Narrative text
+  comes through a model port whose default offline profile is a
+  deterministic composer that refuses any figure not present in its
+  cited inputs; a live profile is defined behind the same port and
+  refuses loudly until a key is wired. Records are hash-chained
+  evidence, versioned: new evidence produces the next version with
+  a computed diff, the superseded version stays on the chain.
 
-The rest of the investigation — cited findings, disposition
-drafting, SAR narrative + citation verification, dual-control
-approval, regulatory clocks — lands in rounds R4–R9 per the round
-map in `docs/architecture.md`.
+The rest of the investigation — the disposition gate, SAR narrative
++ citation verification, dual-control approval, regulatory clocks —
+lands in rounds R5–R9 per the round map in `docs/architecture.md`.
 
 ## Configuration
 
@@ -125,7 +145,7 @@ map in `docs/architecture.md`.
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, screening, typologies, API, SQL store
+make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 
@@ -135,7 +155,11 @@ verification (0), duplicate cases per alert (0), audit gaps (0),
 screening runs accepted without a pin (0), stale screenings left
 unflagged (0), planted typologies missed (0), typology false fires
 on control accounts (0), typology figure mismatches (0), typology
-runs not idempotent (0), findings without their rule version (0).
+runs not idempotent (0), findings without their rule version (0),
+investigation citations failing to resolve (0), unresolvable
+findings accepted at record time (0), investigation hypotheses
+wrong or incomplete (0), statement figures not tracing to citations
+(0), investigation re-runs duplicating records (0).
 
 ## Honest status
 
@@ -143,8 +167,10 @@ runs not idempotent (0), findings without their rule version (0).
   are licensed integrations, wired behind the screening port in R2.
 - The monitoring system is a port with a reference feed; no real
   core/monitoring vendor is connected.
-- Live-model SAR drafting (R6) is built and stub-tested until a model
-  key is provided; the offline profile runs all tests and evals.
+- Investigation narrative (R4) runs on the deterministic offline
+  composer; the live model profile is defined behind the model port
+  and not yet exercised — it refuses loudly until a key is wired.
+  Live-model SAR drafting (R6) follows the same pattern.
 - No SAR is ever actually filed — the blueprint ends at an approved,
   sealed case file.
 - The Docker image builds in CI-grade environments; the compose
