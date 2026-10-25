@@ -17,6 +17,7 @@ from aml_investigations.clocks import RegulatoryClockService
 from aml_investigations.config import Settings
 from aml_investigations.dispositions import DispositionService
 from aml_investigations.evidence import EvidenceService
+from aml_investigations.gateway import ModelGateway, default_gateway_config
 from aml_investigations.intake import IntakeService, ListAlertFeed
 from aml_investigations.investigation import InvestigationService
 from aml_investigations.media import AdverseMediaService, ListMediaFeed
@@ -56,6 +57,9 @@ def services(tmp_path: Path) -> Services:
     evidence = EvidenceService(store, objects, seal_store=store)
     quarantine = QuarantineService(store, evidence, seal_store=store)
     evidence.quarantine = quarantine
+    gateway = ModelGateway(
+        default_gateway_config(), store, audit_store=store, evidence=evidence
+    )
     workflow = CaseWorkflow(store, screening_store=store)
     feed = ListAlertFeed(
         [identity_alert("ALRT-S-1"), identity_alert("ALRT-R9-2")]
@@ -96,6 +100,7 @@ def services(tmp_path: Path) -> Services:
         seal_store=store,
         review_store=store,
         quarantine=quarantine,
+        gateway=gateway,
     )
     approvals = SarApprovalService(
         store, store, store, store, sar, evidence, workflow, seal_store=store
@@ -150,6 +155,9 @@ def services(tmp_path: Path) -> Services:
         transaction_streams_path=tmp_path / "streams.json",
         typology_rules_path=tmp_path / "rules.json",
         adverse_media_path=tmp_path / "media.json",
+        model_profiles_path=tmp_path / "profiles.json",
+        model_prices_path=tmp_path / "prices.json",
+        model_profile="offline",
         log_level="INFO",
     )
     return Services(
@@ -180,6 +188,7 @@ def services(tmp_path: Path) -> Services:
         profiles=profiles,
         media_feed=media_feed,
         media=media,
+        gateway=gateway,
     )
 
 

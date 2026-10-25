@@ -61,5 +61,6 @@ def test_migrations_are_idempotent(tmp_path):
         "0008",
         "0009",
         "0010",
+        "0011",
     ]
     assert second == []
