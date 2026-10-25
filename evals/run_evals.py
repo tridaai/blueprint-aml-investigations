@@ -75,6 +75,10 @@ Zero-tolerance counters:
   - article instructions left unquarantined (R12) . must be 0
   - uncited media claims in a record (R12) ........ must be 0
   - media bands wrong on graded fixtures (R12) .... must be 0
+  - model calls without a priced ledger entry (R13) must be 0
+  - silent profile fallbacks accepted (R13) ....... must be 0
+  - budget-breaching calls reaching transport (R13)  must be 0
+  - ledger costs not matching tokens x price (R13)  must be 0
 
 Exit code 0 iff the gate passes.
 """
@@ -104,13 +108,24 @@ from aml_investigations.errors import (  # noqa: E402
     DispositionRefusedError,
     IllegalTransitionError,
     InvestigationRefusedError,
+    ModelBudgetExceededError,
+    ModelProfileConfigError,
+    ModelProfileNotConfiguredError,
     NoTransactionsError,
     RulePackImmutableError,
     SarNarrativeRefusedError,
     ScreeningPinRequiredError,
     SealingRefusedError,
+    UnknownModelProfileError,
 )
 from aml_investigations.evidence import EvidenceService  # noqa: E402
+from aml_investigations.gateway import (  # noqa: E402
+    DEFAULT_PRICES_DATA,
+    DEFAULT_PROFILES_DATA,
+    ModelGateway,
+    default_gateway_config,
+    load_gateway_config,
+)
 from aml_investigations.intake import (  # noqa: E402
     IntakeService,
     ListAlertFeed,
@@ -398,6 +413,14 @@ def main() -> int:
         "media_uncited_claim": 0,
         "media_band_wrong": 0,
         "media_positive_paths_failed": 0,
+        # R13 model gateway counters
+        "gateway_calls_ledgered": 0,
+        "gateway_live_calls_priced": 0,
+        "gateway_unpriced_calls": 0,
+        "gateway_silent_fallback_accepted": 0,
+        "gateway_budget_breach_executed": 0,
+        "gateway_ledger_cost_wrong": 0,
+        "gateway_positive_paths_failed": 0,
     }
 
     store = InMemoryCaseStore()
@@ -3310,7 +3333,374 @@ def main() -> int:
     except Exception:
         counters["media_positive_paths_failed"] += 1
 
-    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9+R10+R11+R12 counters")
+    # ------------------------------------------------------------------
+    # Scenario 16 (R13): the model gateway — profiles as data,
+    # priced calls, the budget wall. Drafting runs through the
+    # gateway: offline calls ledger at zero, every entry carrying
+    # its price-table version and recomputing exactly from its
+    # tokens and unit prices; a stubbed live draft prices to the
+    # cent; unknown and unconfigured profiles and broken
+    # configuration refuse loudly — never a fallback; and once a
+    # case's spend reaches the cap, the next live call is refused
+    # before the transport is touched, the refusal lands on the
+    # case's chain, and the caller can still finish offline.
+    # ------------------------------------------------------------------
+    g_now = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc)
+
+    class _EvalStubTransport:
+        """Provider-shaped stub: returns the prompt's candidate
+        statement and the pinned usage, and counts its calls —
+        the budget leg grades on that count."""
+
+        def __init__(self, usage):
+            self.calls: list[dict] = []
+            self._usage = usage
+
+        def post_json(self, url, *, headers, payload, timeout):
+            self.calls.append({"url": url, "payload": payload})
+            prompt = payload["messages"][0]["content"]
+            candidate = prompt.split("<<<STATEMENT>>>\n", 1)[1].split(
+                "\n<<<END>>>", 1
+            )[0]
+            return {
+                "content": [{"type": "text", "text": candidate}],
+                "usage": self._usage,
+            }
+
+    g_store = InMemoryCaseStore()
+    g_evidence = EvidenceService(
+        g_store,
+        LocalObjectStore(Path(tempfile.mkdtemp(prefix="aml-evals-gw-"))),
+        seal_store=g_store,
+    )
+    g_workflow = CaseWorkflow(g_store, screening_store=g_store)
+    g_gateway = ModelGateway(
+        default_gateway_config(),
+        g_store,
+        environ={},
+        clock=lambda: g_now,
+        audit_store=g_store,
+        evidence=g_evidence,
+    )
+
+    def g_alert(alert_id: str) -> Alert:
+        return Alert(
+            alert_id=alert_id,
+            rule_id="TM-STRUCTURING-01",
+            customer_id="CUST-G-1",
+            account_id="ACCT-G-1",
+            severity="high",
+            detected_on="2026-03-07",
+            summary="Cash deposits clustering under the CTR threshold.",
+            raw={
+                "customer_name": "Daniel Okafor",
+                "customer_dob": "1985-03-04",
+                "customer_identifiers": ["PP-NG-2210"],
+                "counterparties": [],
+            },
+        )
+
+    def g_txn(tid: str, day: date, amount: str, **kw) -> Transaction:
+        return Transaction(
+            transaction_id=tid,
+            account_id="ACCT-G-1",
+            posted_at=datetime.combine(
+                day, time(10, 0), tzinfo=timezone.utc
+            ),
+            direction="credit",
+            amount=Decimal(amount),
+            channel=kw.get("channel", "wire"),
+            cash=kw.get("cash", False),
+        )
+
+    g_stream = [
+        g_txn("T-GS1", date(2026, 2, 10), "4200.00", channel="ach"),
+        g_txn("T-G1", date(2026, 3, 2), "9500", cash=True, channel="branch"),
+        g_txn("T-G2", date(2026, 3, 4), "9600", cash=True, channel="branch"),
+        g_txn("T-G3", date(2026, 3, 6), "9700", cash=True, channel="branch"),
+        g_txn("T-GS2", date(2026, 3, 10), "4200.00", channel="ach"),
+    ]
+    g_intake = IntakeService(
+        g_store,
+        ListAlertFeed([g_alert("EVAL-G-1"), g_alert("EVAL-G-2")]),
+        g_evidence,
+    )
+    g_screening = ScreeningService(g_store, g_store, g_evidence)
+    g_screening.ingest_snapshot(
+        ListSnapshot(
+            list_kind=ListKind.SANCTIONS,
+            version="2026.10.1",
+            published_at="2026-10-01T00:00:00Z",
+            source_note="eval feed",
+            entries=[
+                ListEntry(
+                    entry_id="SDN-1", name="Viktor Petrov",
+                    dob="1962-04-11", identifiers=["PP-XK-4471"],
+                )
+            ],
+        ),
+        actor="eval-feed",
+    )
+    g_typologies = TypologyService(g_store, g_store, g_evidence)
+    g_typologies.register_rule_pack(
+        RulePack(pack_id="eval-pack", version="1.0")
+    )
+    g_investigations = InvestigationService(
+        g_store, g_store, g_store, g_store, g_evidence,
+        disposition_store=g_store, gateway=g_gateway,
+    )
+    g_dispositions = DispositionService(
+        g_store, g_store, g_store, g_store, g_evidence, g_workflow
+    )
+    g_sar = SarNarrativeService(
+        g_store, g_store, g_store, g_store, g_evidence,
+        gateway=g_gateway,
+    )
+    g_subject = ScreeningSubject(
+        subject_ref="customer:CUST-G-1",
+        name="Daniel Okafor",
+        role="customer",
+        dob=date(1985, 3, 4),
+        identifiers=["PP-NG-2210"],
+    )
+    g_profile = AccountProfile(
+        account_id="ACCT-G-1",
+        customer_id="CUST-G-1",
+        opened_on=date(2026, 2, 1),
+        account_type="business_checking",
+        expected_monthly_amount=Decimal("30000"),
+        expected_monthly_count=40,
+    )
+
+    def g_sar_pending(alert_id: str):
+        case_id = g_intake.open_case(alert_id).case_id
+        g_workflow.transition(case_id, CaseStatus.ASSEMBLING, actor="eval")
+        g_screening.screen_case(
+            case_id,
+            {ListKind.SANCTIONS: "2026.10.1"},
+            actor="eval",
+            subjects=[g_subject],
+        )
+        feed = ListTransactionFeed([g_profile], {"ACCT-G-1": g_stream})
+        g_typologies.ingest_from_source(case_id, feed, actor="eval-feed")
+        g_typologies.run_typologies(
+            case_id, "eval-pack", "1.0", actor="eval"
+        )
+        g_workflow.transition(
+            case_id, CaseStatus.INVESTIGATING, actor="eval"
+        )
+        record = g_investigations.run_investigation(case_id, actor="eval")
+        g_workflow.transition(
+            case_id, CaseStatus.AWAITING_ANALYST, actor="eval"
+        )
+        g_dispositions.record_disposition(
+            case_id,
+            analyst_id="a.okafor",
+            analyst_role="analyst",
+            outcome=DispositionOutcome.ESCALATE_SAR,
+            rationale_codes=["STRUCTURING_SUSPECTED"],
+            record_id=record.record_id,
+            record_version=record.version,
+        )
+        return case_id, record
+
+    def g_check_priced(case_id: str) -> None:
+        for entry in g_store.list_call_entries(case_id):
+            expected = (
+                Decimal(entry.tokens_in) * entry.input_per_mtok_usd
+                + Decimal(entry.tokens_out) * entry.output_per_mtok_usd
+            ) / Decimal(1_000_000)
+            if entry.cost_usd != expected or not entry.price_table_version:
+                counters["gateway_ledger_cost_wrong"] += 1
+
+    # The offline leg: every composed statement ledgers, at zero.
+    g_case1 = None
+    try:
+        g_case1, g_record1 = g_sar_pending("EVAL-G-1")
+        g_narrative1, g_verification1 = g_sar.draft_narrative(
+            g_case1, actor="eval"
+        )
+        if not g_verification1.all_verified:
+            counters["gateway_positive_paths_failed"] += 1
+        entries1 = g_store.list_call_entries(g_case1)
+        record_entries = [
+            e for e in entries1 if e.purpose == "record_draft"
+        ]
+        sar_entries = [e for e in entries1 if e.purpose == "sar_draft"]
+        if len(record_entries) != len(g_record1.findings):
+            counters["gateway_unpriced_calls"] += 1
+        if len(sar_entries) != sum(
+            len(s.statements) for s in g_narrative1.sections
+        ):
+            counters["gateway_unpriced_calls"] += 1
+        if any(e.cost_usd != 0 for e in entries1):
+            counters["gateway_ledger_cost_wrong"] += 1
+        counters["gateway_calls_ledgered"] += len(entries1)
+        g_check_priced(g_case1)
+    except Exception:
+        counters["gateway_positive_paths_failed"] += 1
+
+    # The live leg: a stubbed hosted-frontier draft prices
+    # exactly, statement by statement.
+    g_stub = _EvalStubTransport(
+        {"input_tokens": 100, "output_tokens": 50}
+    )
+    g_live_gateway = ModelGateway(
+        default_gateway_config(),
+        g_store,
+        environ={"ANTHROPIC_API_KEY": "eval-key"},
+        transport=g_stub,
+        clock=lambda: g_now,
+        audit_store=g_store,
+        evidence=g_evidence,
+    )
+    g_live_sar = SarNarrativeService(
+        g_store, g_store, g_store, g_store, g_evidence,
+        gateway=g_live_gateway,
+    )
+    if g_case1 is not None:
+        try:
+            g_narrative2, g_verification2 = g_live_sar.draft_narrative(
+                g_case1, actor="eval", profile="hosted-frontier"
+            )
+            statements2 = sum(
+                len(s.statements) for s in g_narrative2.sections
+            )
+            live_entries = [
+                e
+                for e in g_store.list_call_entries(g_case1)
+                if e.profile_id == "hosted-frontier"
+            ]
+            if not g_verification2.all_verified or g_narrative2.version != 2:
+                counters["gateway_positive_paths_failed"] += 1
+            if len(live_entries) != statements2 or len(g_stub.calls) != statements2:
+                counters["gateway_unpriced_calls"] += 1
+            # (100 * 3.00 + 50 * 15.00) / 1e6 = 1050 / 1e6 a call.
+            if any(
+                e.cost_usd != Decimal("0.00105") for e in live_entries
+            ):
+                counters["gateway_ledger_cost_wrong"] += 1
+            counters["gateway_live_calls_priced"] += len(live_entries)
+            counters["gateway_calls_ledgered"] += len(live_entries)
+        except Exception:
+            counters["gateway_positive_paths_failed"] += 1
+
+    # Fail-closed probes: none of these may produce a composer.
+    for g_probe in (
+        lambda: g_gateway.composer_for(
+            "no-such-profile", case_id=None, purpose="sar_draft"
+        ),
+        lambda: g_gateway.composer_for(
+            "hosted-frontier", case_id=None, purpose="sar_draft"
+        ),
+        lambda: g_gateway.composer_for(
+            "in-boundary", case_id=None, purpose="sar_draft"
+        ),
+    ):
+        try:
+            g_probe()
+            counters["gateway_silent_fallback_accepted"] += 1
+        except (UnknownModelProfileError, ModelProfileNotConfiguredError):
+            pass
+        except Exception:
+            counters["gateway_silent_fallback_accepted"] += 1
+    try:
+        load_gateway_config(
+            {
+                **DEFAULT_PROFILES_DATA,
+                "profiles": [
+                    {
+                        **DEFAULT_PROFILES_DATA["profiles"][1],
+                        "model": "unpriced-model",
+                    }
+                ],
+            },
+            DEFAULT_PRICES_DATA,
+        )
+        counters["gateway_silent_fallback_accepted"] += 1
+    except ModelProfileConfigError:
+        pass
+    except Exception:
+        counters["gateway_silent_fallback_accepted"] += 1
+    try:
+        ModelGateway(
+            default_gateway_config(),
+            InMemoryCaseStore(),
+            environ={},
+            active_profile="hosted-frontier",
+        )
+        counters["gateway_silent_fallback_accepted"] += 1
+    except ModelProfileNotConfiguredError:
+        pass
+    except Exception:
+        counters["gateway_silent_fallback_accepted"] += 1
+
+    # The budget leg: a second case, a two-call cap. The third
+    # live statement is refused before transport; the refusal is
+    # recorded; the case still finishes offline.
+    try:
+        g_case2, _g_record2 = g_sar_pending("EVAL-G-2")
+        g_budget_config = load_gateway_config(
+            {**DEFAULT_PROFILES_DATA, "case_budget_usd": "0.002"},
+            DEFAULT_PRICES_DATA,
+        )
+        g_budget_stub = _EvalStubTransport(
+            {"input_tokens": 100, "output_tokens": 50}
+        )
+        g_budget_gateway = ModelGateway(
+            g_budget_config,
+            g_store,
+            environ={"ANTHROPIC_API_KEY": "eval-key"},
+            transport=g_budget_stub,
+            clock=lambda: g_now,
+            audit_store=g_store,
+            evidence=g_evidence,
+        )
+        g_budget_sar = SarNarrativeService(
+            g_store, g_store, g_store, g_store, g_evidence,
+            gateway=g_budget_gateway,
+        )
+        try:
+            g_budget_sar.draft_narrative(
+                g_case2, actor="eval", profile="hosted-frontier"
+            )
+            counters["gateway_budget_breach_executed"] += 1
+        except ModelBudgetExceededError:
+            pass
+        except Exception:
+            counters["gateway_budget_breach_executed"] += 1
+        if len(g_budget_stub.calls) != 2:
+            counters["gateway_budget_breach_executed"] += 1
+        if len(g_store.list_budget_events(g_case2)) != 1:
+            counters["gateway_budget_breach_executed"] += 1
+        if not any(
+            e.event == "model_budget_refused"
+            for e in g_store.list_audit(g_case2)
+        ):
+            counters["gateway_budget_breach_executed"] += 1
+        if not any(
+            i.kind == "model_budget_refusal"
+            for i in g_store.list_evidence(g_case2)
+        ):
+            counters["gateway_budget_breach_executed"] += 1
+        try:
+            if not g_evidence.verify_chain(g_case2):
+                counters["chains_failed"] += 1
+        except Exception:
+            counters["chains_failed"] += 1
+        g_narrative3, g_verification3 = g_budget_sar.draft_narrative(
+            g_case2, actor="eval"
+        )
+        if not g_verification3.all_verified:
+            counters["gateway_positive_paths_failed"] += 1
+        counters["gateway_calls_ledgered"] += len(
+            g_store.list_call_entries(g_case2)
+        )
+        g_check_priced(g_case2)
+    except Exception:
+        counters["gateway_positive_paths_failed"] += 1
+
+    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9+R10+R11+R12+R13 counters")
     for key, value in counters.items():
         print(f"  {key}: {value}")
     zero_tolerance = [
@@ -3393,6 +3783,11 @@ def main() -> int:
         "media_uncited_claim",
         "media_band_wrong",
         "media_positive_paths_failed",
+        "gateway_unpriced_calls",
+        "gateway_silent_fallback_accepted",
+        "gateway_budget_breach_executed",
+        "gateway_ledger_cost_wrong",
+        "gateway_positive_paths_failed",
     ]
     passed = all(counters[k] == 0 for k in zero_tolerance) and counters["cases_opened"] == len(ALERTS)
     print("GATE: PASS" if passed else "GATE: FAIL")
