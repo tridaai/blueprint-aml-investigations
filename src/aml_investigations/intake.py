@@ -11,6 +11,7 @@ import json
 from datetime import date, timedelta
 from pathlib import Path
 
+from .clocks import RegulatoryClockService
 from .errors import AlertNotFoundError
 from .evidence import EvidenceService
 from .logging_config import get_logger
@@ -70,6 +71,12 @@ class IntakeService:
     """Opens cases from alerts. Intake is idempotent per alert: a
     re-delivered alert returns the existing case instead of opening a
     duplicate (monitoring systems re-send; case files must not fork).
+
+    When a clock service is wired (R8), opening a case also fires
+    the continuing-activity trigger: a new case for a customer with
+    a prior ``filed_sar`` case gets its continuing-activity clock
+    started on its evidence chain (see ``clocks.py``). The hook is
+    optional so bare test stacks wire intake exactly as before.
     """
 
     def __init__(
@@ -77,10 +84,12 @@ class IntakeService:
         store: CaseStore,
         source: AlertSource,
         evidence: EvidenceService,
+        clock_service: RegulatoryClockService | None = None,
     ) -> None:
         self._store = store
         self._source = source
         self._evidence = evidence
+        self._clocks = clock_service
 
     def open_case(self, alert_id: str, *, actor: str = "intake-service") -> Case:
         existing = self._store.get_case_by_alert(alert_id)
@@ -126,6 +135,13 @@ class IntakeService:
             source_ref=f"monitoring-feed:{alert.alert_id}",
             captured_by=actor,
         )
+        # R8: the continuing-activity trigger. A new case for a
+        # customer whose prior case reached filed_sar starts a
+        # 90/120-day continuing-activity clock, linked on this
+        # case's chain.
+        if self._clocks is not None:
+            opened = self._store.get_case(case.case_id) or case
+            self._clocks.record_continuing_link(opened, actor=actor)
         logger.info(
             "case opened",
             extra={"case_id": case.case_id, "event": "case_opened", "alert_id": alert.alert_id},

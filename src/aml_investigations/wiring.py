@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .approval import SarApprovalService
+from .clocks import RegulatoryClockService
 from .config import Settings, load_settings
 from .dispositions import DispositionService
 from .evidence import EvidenceService
@@ -55,6 +56,7 @@ class Services:
     sar: SarNarrativeService
     approvals: SarApprovalService
     sealing: CaseSealingService
+    clocks: RegulatoryClockService
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -74,7 +76,10 @@ def build_services(settings: Settings | None = None) -> Services:
     evidence = EvidenceService(store, objects, seal_store=store)
     workflow = CaseWorkflow(store, screening_store=store)
     alerts = ReferenceAlertFeed(settings.seed_alerts_path)
-    intake = IntakeService(store, alerts, evidence)
+    clocks = RegulatoryClockService(
+        store, store, store, evidence, approvals=store
+    )
+    intake = IntakeService(store, alerts, evidence, clock_service=clocks)
     screening = ScreeningService(store, store, evidence, seal_store=store)
     screening_feed = ReferenceScreeningFeed(settings.screening_lists_path)
     transactions = ReferenceTransactionFeed(settings.transaction_streams_path)
@@ -125,4 +130,5 @@ def build_services(settings: Settings | None = None) -> Services:
         sar=sar,
         approvals=approvals,
         sealing=sealing,
+        clocks=clocks,
     )
