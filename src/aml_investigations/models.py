@@ -1634,6 +1634,116 @@ class ContinuingReviewDisposition(BaseModel):
     evidence_seq: int | None = None
 
 
+# ---------------------------------------------------------------------------
+# Quarantine (R10, Law 7): instructions inside evidence are case events
+# ---------------------------------------------------------------------------
+
+
+class QuarantineMatch(BaseModel):
+    """One instruction-pattern match inside one text field.
+
+    The span addresses the field's own string (``start``/``end``
+    character offsets), and ``excerpt`` is the matched text itself —
+    kept on the record so an analyst can see exactly what the
+    scanner saw without re-reading the evidence item.
+    """
+
+    pattern_id: str = Field(description="e.g. override.instructions.")
+    family: str = Field(
+        description="override | roleplay | system_marker | "
+        "case_directive | output_directive | encoded_payload"
+    )
+    start: int = Field(ge=0)
+    end: int = Field(ge=0)
+    excerpt: str
+
+
+class QuarantineField(BaseModel):
+    """Every match inside one named text field of one evidence item.
+
+    Field labels name where the text lives: ``summary`` and
+    ``raw.<path>`` on the alert payload, ``transaction:<id>.memo``
+    and ``transaction:<id>.counterparty`` on a transaction batch,
+    ``hit:<id>.subject_name`` / ``hit:<id>.entry_name`` on a
+    screening result, ``content`` on a document item. The label is
+    the join key between the quarantine record, the fencing the
+    composers apply, and the spans the verifiers exclude from the
+    groundable token set.
+    """
+
+    field: str
+    matches: list[QuarantineMatch] = Field(min_length=1)
+
+
+class QuarantineRecord(BaseModel):
+    """One quarantine event: an item's untrusted text matched the
+    instruction pattern pack at ingestion.
+
+    Stored as a hash-chained evidence item (kind
+    ``quarantine_event``) and nothing else — quarantine state is
+    derived from the chain like seals and clocks. The evidence item
+    itself is NOT rejected and NOT edited (Law 5): the record points
+    at it, and the point is what fences it everywhere it is
+    consumed. ``quarantine_seq`` is the seq of the quarantine_event
+    item itself, assigned by the reader from the chain position —
+    the stored content carries everything else.
+    """
+
+    case_id: str
+    quarantine_seq: int = Field(
+        default=0,
+        description="Seq of the quarantine_event evidence item "
+        "(assigned from the chain when read; 0 in stored content).",
+    )
+    source_kind: str = Field(
+        description="alert_payload | transaction_batch | "
+        "screening_result | evidence_document"
+    )
+    evidence_seq: int = Field(
+        description="Seq of the evidence item whose text matched."
+    )
+    pack_version: str
+    fields: list[QuarantineField] = Field(min_length=1)
+    recorded_by: str
+    recorded_at: datetime = Field(default_factory=_utcnow)
+
+
+class QuarantineReview(BaseModel):
+    """A named analyst's review of one quarantine record (R10).
+
+    An audit act, recorded as a hash-chained evidence item (kind
+    ``quarantine_review``). Review never un-fences the content:
+    the fences derive from the quarantine record, which is
+    append-only, so a reviewed item is consumed exactly as
+    fenced as an unreviewed one.
+    """
+
+    case_id: str
+    quarantine_seq: int = Field(
+        description="Seq of the quarantine_event item reviewed."
+    )
+    reviewer: str
+    note: str = ""
+    reviewed_at: datetime = Field(default_factory=_utcnow)
+    evidence_seq: int | None = None
+
+
+class QuarantineQueueEntry(BaseModel):
+    """One row of the cross-case quarantine queue (R10)."""
+
+    case_id: str
+    customer_id: str
+    case_status: CaseStatus
+    quarantine_seq: int
+    source_kind: str
+    evidence_seq: int
+    fields: list[str] = Field(default_factory=list)
+    pattern_ids: list[str] = Field(default_factory=list)
+    families: list[str] = Field(default_factory=list)
+    status: str = Field(description="flagged | reviewed")
+    reviewed_by: str | None = None
+
+
 class ExportVerification(BaseModel):
     """The offline verdict on one exported case-file package (R7).
 

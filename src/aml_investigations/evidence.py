@@ -112,6 +112,13 @@ class EvidenceService:
         # legal-hold items) are the only writes a sealed case
         # accepts, and they pass custody_record=True.
         self._seals = seal_store
+        # R10: the quarantine hook. Set after construction (the
+        # quarantine service itself writes through this funnel, so
+        # it cannot be a constructor argument here): when set,
+        # every caller-supplied document item — any kind the
+        # system's own services do not write — is scanned for
+        # instruction patterns as it lands. See quarantine.py.
+        self.quarantine = None
 
     def add_item(
         self,
@@ -170,6 +177,19 @@ class EvidenceService:
                 },
             )
         )
+        # R10 (Law 7): the funnel scan. Caller-supplied document
+        # kinds are untrusted text by construction; the system's
+        # own kinds are scanned with field precision by their own
+        # services (or are system-generated outright) and are
+        # exempt here, so nothing is ever recorded twice. The scan
+        # records a quarantine event when the text carries an
+        # instruction pattern; it never rejects the item.
+        hook = self.quarantine
+        if hook is not None and not custody_record:
+            from .quarantine import SYSTEM_EVIDENCE_KINDS
+
+            if kind not in SYSTEM_EVIDENCE_KINDS:
+                hook.scan_document(case_id, item.seq, content, actor=captured_by)
         logger.info(
             "evidence added",
             extra={"case_id": case_id, "event": "evidence_added"},

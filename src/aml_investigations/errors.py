@@ -302,3 +302,21 @@ class ContinuingReviewRefusedError(ContinuingReviewError):
 
 class ReviewNotFoundError(ContinuingReviewError):
     """The named review does not exist on this case."""
+
+
+class QuarantineError(AmlError):
+    """Base class for R10 quarantine failures."""
+
+
+class QuarantineRefusedError(QuarantineError):
+    """A quarantine action was refused, with a machine-readable
+    reason: anonymous_or_system_actor, already_reviewed. The
+    refusal is audited before it is raised."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class QuarantineNotFoundError(QuarantineError):
+    """The named quarantine record does not exist on this case."""
