@@ -1,0 +1,24 @@
+{
+  "version": "2026.10.1",
+  "as_of": "2026-10-01",
+  "entries": [
+    {
+      "model": "offline-template-composer-v1",
+      "input_per_mtok_usd": "0",
+      "output_per_mtok_usd": "0",
+      "basis": "deterministic template composer \u2014 no model call, no cost; priced so every call can ledger"
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "input_per_mtok_usd": "3.00",
+      "output_per_mtok_usd": "15.00",
+      "basis": "provider list price at the table's as-of date \u2014 governed reference data, maintained by the deployment"
+    },
+    {
+      "model": "llama-3.3-70b-instruct",
+      "input_per_mtok_usd": "0.90",
+      "output_per_mtok_usd": "0.90",
+      "basis": "internal serving-cost allocation for the bank's own inference boundary, set by the deployment"
+    }
+  ]
+}

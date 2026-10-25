@@ -1,0 +1,29 @@
+{
+  "version": "2026.10.1",
+  "case_budget_usd": "2.50",
+  "profiles": [
+    {
+      "profile_id": "offline",
+      "provider_kind": "offline",
+      "model": "offline-template-composer-v1"
+    },
+    {
+      "profile_id": "hosted-frontier",
+      "provider_kind": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "endpoint_env": "ANTHROPIC_BASE_URL",
+      "endpoint_default": "https://api.anthropic.com",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "key_required": true
+    },
+    {
+      "profile_id": "in-boundary",
+      "provider_kind": "openai-compatible",
+      "model": "llama-3.3-70b-instruct",
+      "endpoint_env": "IN_BOUNDARY_MODEL_URL",
+      "endpoint_default": null,
+      "api_key_env": "IN_BOUNDARY_MODEL_API_KEY",
+      "key_required": false
+    }
+  ]
+}
