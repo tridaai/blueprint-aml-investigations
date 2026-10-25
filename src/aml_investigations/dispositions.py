@@ -45,7 +45,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from .errors import CaseNotFoundError, DispositionRefusedError
-from .evidence import EvidenceService
+from .evidence import EvidenceService, ensure_case_mutable
 from .logging_config import get_logger
 from .models import (
     AuditEvent,
@@ -62,6 +62,7 @@ from .ports import (
     DispositionStore,
     InvestigationStore,
     ScreeningStore,
+    SealStore,
 )
 from .workflow import CaseWorkflow, unresolved_sanctions_hits
 
@@ -224,6 +225,7 @@ class DispositionService:
         dispositions: DispositionStore,
         evidence: EvidenceService,
         workflow: CaseWorkflow,
+        seal_store: SealStore | None = None,
     ) -> None:
         self._store = store
         self._screening = screening_store
@@ -231,6 +233,7 @@ class DispositionService:
         self._dispositions = dispositions
         self._evidence = evidence
         self._workflow = workflow
+        self._seals = seal_store
 
     # -- refusals -----------------------------------------------------
 
@@ -293,6 +296,7 @@ class DispositionService:
         missing_evidence: list[str] | None = None,
     ) -> DispositionRecord:
         case = self._require_case(case_id)
+        ensure_case_mutable(self._seals, case_id)
         actor = f"analyst:{analyst_id}"
         self._validate_identity(case_id, analyst_id, analyst_role, who="analyst")
 
@@ -515,6 +519,7 @@ class DispositionService:
         note: str = "",
     ) -> DispositionConfirmation:
         case = self._require_case(case_id)
+        ensure_case_mutable(self._seals, case_id)
         actor = f"analyst:{confirmer_id}"
         self._validate_identity(
             case_id, confirmer_id, confirmer_role, who="confirmer"

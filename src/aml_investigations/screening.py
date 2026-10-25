@@ -32,7 +32,7 @@ from .errors import (
     SnapshotImmutableError,
     SnapshotNotFoundError,
 )
-from .evidence import EvidenceService
+from .evidence import EvidenceService, ensure_case_mutable
 from .logging_config import get_logger
 from .models import (
     AuditEvent,
@@ -47,7 +47,7 @@ from .models import (
     ScreeningSubject,
     TERMINAL_STATUSES,
 )
-from .ports import CaseStore, ScreeningStore
+from .ports import CaseStore, ScreeningStore, SealStore
 
 logger = get_logger(__name__)
 
@@ -213,10 +213,12 @@ class ScreeningService:
         store: CaseStore,
         screening_store: ScreeningStore,
         evidence: EvidenceService,
+        seal_store: SealStore | None = None,
     ) -> None:
         self._store = store
         self._screening = screening_store
         self._evidence = evidence
+        self._seals = seal_store
 
     # -- snapshot ingest ------------------------------------------------
 
@@ -399,6 +401,7 @@ class ScreeningService:
         case = self._store.get_case(case_id)
         if case is None:
             raise CaseNotFoundError(case_id)
+        ensure_case_mutable(self._seals, case_id)
         if not pins:
             raise ScreeningPinRequiredError(
                 "screening requires an explicit pinned snapshot set "
@@ -612,6 +615,7 @@ class ScreeningService:
         hit = self._screening.get_hit(hit_id)
         if hit is None:
             raise HitNotFoundError(hit_id)
+        ensure_case_mutable(self._seals, hit.case_id)
         if hit.status is status:
             return hit
         hit = hit.model_copy(

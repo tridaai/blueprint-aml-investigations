@@ -35,7 +35,7 @@ from .errors import (
     TransactionMismatchError,
     TypologyError,
 )
-from .evidence import EvidenceService
+from .evidence import EvidenceService, ensure_case_mutable
 from .logging_config import get_logger
 from .models import (
     AccountProfile,
@@ -46,7 +46,13 @@ from .models import (
     TypologyFinding,
     TypologyRun,
 )
-from .ports import CaseStore, RulePackSource, TransactionSource, TypologyStore
+from .ports import (
+    CaseStore,
+    RulePackSource,
+    SealStore,
+    TransactionSource,
+    TypologyStore,
+)
 
 logger = get_logger(__name__)
 
@@ -535,10 +541,12 @@ class TypologyService:
         store: CaseStore,
         typology_store: TypologyStore,
         evidence: EvidenceService,
+        seal_store: SealStore | None = None,
     ) -> None:
         self._store = store
         self._typology = typology_store
         self._evidence = evidence
+        self._seals = seal_store
 
     # -- rule packs -----------------------------------------------------
 
@@ -616,6 +624,7 @@ class TypologyService:
         case = self._store.get_case(case_id)
         if case is None:
             raise CaseNotFoundError(case_id)
+        ensure_case_mutable(self._seals, case_id)
         if not transactions:
             raise TypologyError("an empty transaction batch carries no evidence")
         accounts = {t.account_id for t in transactions}
@@ -685,6 +694,7 @@ class TypologyService:
         case = self._store.get_case(case_id)
         if case is None:
             raise CaseNotFoundError(case_id)
+        ensure_case_mutable(self._seals, case_id)
         profile = source.get_profile(case.account_id)
         if profile is not None:
             self._typology.save_account_profile(profile)
@@ -713,6 +723,7 @@ class TypologyService:
         case = self._store.get_case(case_id)
         if case is None:
             raise CaseNotFoundError(case_id)
+        ensure_case_mutable(self._seals, case_id)
         pack = self._typology.get_rule_pack(pack_id, version)
         if pack is None:
             raise RulePackNotFoundError(

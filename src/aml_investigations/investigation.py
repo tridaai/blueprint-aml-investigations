@@ -61,7 +61,7 @@ from .errors import (
     InvestigationRefusedError,
     InvestigationStateError,
 )
-from .evidence import EvidenceService
+from .evidence import EvidenceService, ensure_case_mutable
 from .logging_config import get_logger
 from .models import (
     AccountProfile,
@@ -91,6 +91,7 @@ from .ports import (
     DispositionStore,
     InvestigationStore,
     ScreeningStore,
+    SealStore,
     TypologyStore,
 )
 from .typologies import input_fingerprint as _txn_fingerprint
@@ -603,12 +604,17 @@ class InvestigationService:
         investigation_store: InvestigationStore,
         evidence: EvidenceService,
         disposition_store: DispositionStore | None = None,
+        seal_store: SealStore | None = None,
     ) -> None:
         self._store = store
         self._screening = screening_store
         self._typologies = typology_store
         self._records = investigation_store
         self._evidence = evidence
+        # R7: a sealed case file is read-only — run_investigation
+        # refuses before the state check, so a sealed closed case
+        # hears the seal refusal, not a state complaint.
+        self._seals = seal_store
         # R5: when a disposition store is wired, persisting a new
         # record version flags any disposition that relied on an
         # older version as stale (the gate's DISPOSITION_STALE flag).
@@ -638,6 +644,7 @@ class InvestigationService:
         case = self._store.get_case(case_id)
         if case is None:
             raise CaseNotFoundError(f"case {case_id} not found")
+        ensure_case_mutable(self._seals, case_id)
         if case.status is not CaseStatus.INVESTIGATING:
             raise InvestigationStateError(
                 f"case {case_id} is {case.status.value}; the "

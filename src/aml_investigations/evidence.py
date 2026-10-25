@@ -18,14 +18,60 @@ from __future__ import annotations
 
 import hashlib
 
-from .errors import CaseNotFoundError, EvidenceChainError
+from .errors import CaseNotFoundError, CaseSealedError, EvidenceChainError
 from .logging_config import get_logger
-from .models import AuditEvent, EvidenceItem
-from .ports import CaseStore, ObjectStore
+from .models import AuditEvent, CaseSeal, EvidenceItem
+from .ports import CaseStore, ObjectStore, SealStore
 
 logger = get_logger(__name__)
 
 GENESIS = "GENESIS"
+
+
+# ---------------------------------------------------------------------------
+# Sealed-state derivation (R7): the read-only guard's helpers.
+#
+# A case's sealed state is never a stored flag someone could flip:
+# it is derived from the append-only seal history. The operative
+# seal is the latest seal (by chain position) that no later unseal
+# lifts. Every mutating service path consults these helpers — the
+# evidence funnel below, and each service's own entry guard — so a
+# sealed case refuses identically at every door (Law 5).
+# ---------------------------------------------------------------------------
+
+
+def operative_seal(seal_store: SealStore, case_id: str) -> CaseSeal | None:
+    """The seal currently in force for a case, or None.
+
+    Seals and unseals are ordered by the chain position
+    (``evidence_seq``) of their custody records — a total order
+    the append-only history cannot tie or rewrite.
+    """
+    seals = seal_store.list_seals(case_id)
+    if not seals:
+        return None
+    unseals = seal_store.list_unseals(case_id)
+    last_unseal_seq = max((u.evidence_seq or 0 for u in unseals), default=0)
+    live = [s for s in seals if (s.evidence_seq or 0) > last_unseal_seq]
+    return live[-1] if live else None
+
+
+def case_is_sealed(seal_store: SealStore, case_id: str) -> bool:
+    return operative_seal(seal_store, case_id) is not None
+
+
+def ensure_case_mutable(seal_store: SealStore | None, case_id: str) -> None:
+    """Refuse (CaseSealedError) when the case stands sealed.
+
+    A no-op when no seal store is wired (a bare stack in a test
+    double) — the guard binds wherever sealing is in force, which
+    in every real wiring it is.
+    """
+    if seal_store is None:
+        return
+    seal = operative_seal(seal_store, case_id)
+    if seal is not None:
+        raise CaseSealedError(case_id, seal.seal_id)
 
 
 def content_hash(content: bytes) -> str:
@@ -50,9 +96,22 @@ def object_key_for(case_id: str, seq: int, item_content_hash: str) -> str:
 
 
 class EvidenceService:
-    def __init__(self, store: CaseStore, objects: ObjectStore) -> None:
+    def __init__(
+        self,
+        store: CaseStore,
+        objects: ObjectStore,
+        seal_store: SealStore | None = None,
+    ) -> None:
         self._store = store
         self._objects = objects
+        # R7: when a seal store is wired, the evidence funnel is the
+        # choke point of the sealed read-only rule — every service's
+        # writes land here eventually, and a sealed case refuses
+        # here even if a caller forgot its own entry guard. The
+        # sealing service's own custody records (seal, unseal,
+        # legal-hold items) are the only writes a sealed case
+        # accepts, and they pass custody_record=True.
+        self._seals = seal_store
 
     def add_item(
         self,
@@ -64,10 +123,13 @@ class EvidenceService:
         captured_by: str,
         media_type: str = "application/json",
         legal_hold: bool = False,
+        custody_record: bool = False,
     ) -> EvidenceItem:
         case = self._store.get_case(case_id)
         if case is None:
             raise CaseNotFoundError(case_id)
+        if not custody_record:
+            ensure_case_mutable(self._seals, case_id)
         existing = self._store.list_evidence(case_id)
         seq = len(existing) + 1
         prev_hash = existing[-1].chain_hash if existing else None
