@@ -31,8 +31,15 @@ nobody's calendar is consulted:
   continuing-activity link on the new case (an evidence item) and
   a second clock starts: review due at the prior filing
   determination date + 90 days, filing due at + 120, per FinCEN's
-  continuing-activity guidance. The review workflow that answers
-  this clock is R9; this round starts the clock and escalates it.
+  continuing-activity guidance. R9's review workflow answers this
+  clock, and the derivation learns the answer here: when a review
+  store is attached, a cycle is answered ONLY by a recorded
+  review disposition naming that cycle — a file-continuing answer
+  leaves the cycle live against the filing deadline until the
+  case reaches ``filed_sar``, and a no-file answer ends the cycle
+  ``closed_no_file`` and starts the next cycle from its own
+  decision date (rolling 90/120, chained by review id). A review
+  opened but not dispositioned answers nothing.
 
 - **Escalation.** A clock's state is derived — ``on_track``,
   ``due_soon`` (within seven days), ``due``, ``overdue`` — by pure
@@ -71,16 +78,20 @@ from .models import (
     ConfirmationOutcome,
     ContinuingActivityClock,
     ContinuingActivityLink,
+    ContinuingReview,
+    ContinuingReviewDisposition,
     DispositionOutcome,
     DispositionRecord,
     EscalationQueueEntry,
     FilingClock,
     HitStatus,
+    ReviewOutcome,
     TERMINAL_STATUSES,
 )
 from .ports import (
     ApprovalStore,
     CaseStore,
+    ContinuingReviewStore,
     DispositionStore,
     ScreeningStore,
 )
@@ -179,12 +190,19 @@ class RegulatoryClockService:
         dispositions: DispositionStore,
         evidence: EvidenceService,
         approvals: ApprovalStore | None = None,
+        review_store: ContinuingReviewStore | None = None,
     ) -> None:
         self._store = store
         self._screening = screening_store
         self._dispositions = dispositions
         self._evidence = evidence
         self._approvals = approvals
+        # R9: when a review store is attached, the continuing
+        # clock learns its cycles' outcomes from the recorded
+        # review dispositions. Without one, the derivation is
+        # exactly R8's — reviews change what the clock knows,
+        # never how it counts.
+        self._reviews = review_store
 
     # -- derivation helpers -------------------------------------------
 
@@ -361,40 +379,211 @@ class RegulatoryClockService:
                 seq = item.seq
         return seq
 
-    def continuing_clock(
-        self, case: Case, *, as_of: date
-    ) -> ContinuingActivityClock | None:
+    # -- continuing-activity cycles (R9) ---------------------------
+    #
+    # The cycle chain is derived, never stored: cycle 1 starts at
+    # the link's determination; every no-file review disposition
+    # starts the next cycle at its own decision date, chained by
+    # its review id. A cycle is answered ONLY by a recorded review
+    # disposition — an opened-but-undispositioned review leaves
+    # its cycle exactly as unanswered as if it did not exist.
+
+    def _operative_review(
+        self, case_id: str, cycle: int
+    ) -> ContinuingReview | None:
+        """The review that stands for a cycle: the newest one
+        opened for it. A stale review superseded by a fresh one
+        for the same cycle does not stand — the replacement does."""
+        if self._reviews is None:
+            return None
+        candidates = [
+            r for r in self._reviews.list_reviews(case_id) if r.cycle == cycle
+        ]
+        if not candidates:
+            return None
+        return candidates[-1]
+
+    def _review_disposition(
+        self, review: ContinuingReview | None
+    ) -> ContinuingReviewDisposition | None:
+        if review is None or self._reviews is None:
+            return None
+        return self._reviews.get_review_disposition_for(review.review_id)
+
+    def _cycle_starts(
+        self, case: Case, link: ContinuingActivityLink
+    ) -> list[tuple[int, date, str | None]]:
+        """(cycle, determination, prior_review_id) for every
+        cycle, oldest first. A file-continuing disposition starts
+        nothing: its cycle stays open against the filing deadline
+        until the case files."""
+        starts = [(1, link.determination_on, None)]
+        cycle = 1
+        while True:
+            review = self._operative_review(case.case_id, cycle)
+            disposition = self._review_disposition(review)
+            if (
+                disposition is None
+                or disposition.outcome
+                is not ReviewOutcome.NO_FILE_THIS_CYCLE
+            ):
+                return starts
+            starts.append(
+                (
+                    cycle + 1,
+                    disposition.decided_at.date(),
+                    review.review_id if review is not None else None,
+                )
+            )
+            cycle += 1
+
+    def current_cycle(
+        self, case: Case
+    ) -> tuple[int, date, date, date, str | None] | None:
+        """The case's live continuing cycle — (cycle,
+        determination, review due, filing due, prior review id) —
+        or None when no continuing clock was started. The review
+        workflow opens its reviews against exactly this
+        descriptor."""
         link = self.continuing_link_for(case.case_id)
         if link is None:
             return None
-        no_file = self._no_file_disposition(case)
-        review_overdue = as_of > link.review_due_on
-        if as_of <= link.review_due_on:
-            operative, kind = link.review_due_on, "continuing_review"
-        else:
-            operative, kind = link.filing_due_on, "continuing_filing"
-        if case.status is CaseStatus.FILED_SAR:
-            state, remaining = ClockState.SATISFIED, None
-        elif no_file is not None:
+        cycle, determination, prior_review_id = self._cycle_starts(
+            case, link
+        )[-1]
+        review_due, filing_due = continuing_deadlines(determination)
+        return cycle, determination, review_due, filing_due, prior_review_id
+
+    def operative_review(self, case: Case) -> ContinuingReview | None:
+        """The review standing for the case's current cycle."""
+        current = self.current_cycle(case)
+        if current is None:
+            return None
+        return self._operative_review(case.case_id, current[0])
+
+    def _cycle_clock(
+        self,
+        case: Case,
+        link: ContinuingActivityLink,
+        *,
+        cycle: int,
+        determination_on: date,
+        prior_review_id: str | None,
+        review: ContinuingReview | None,
+        disposition: ContinuingReviewDisposition | None,
+        as_of: date,
+    ) -> ContinuingActivityClock:
+        review_due_on, filing_due_on = continuing_deadlines(
+            determination_on
+        )
+        answered_by = (
+            review.review_id
+            if disposition is not None and review is not None
+            else None
+        )
+        answered_outcome = (
+            disposition.outcome.value if disposition is not None else None
+        )
+        if (
+            disposition is not None
+            and disposition.outcome
+            is ReviewOutcome.NO_FILE_THIS_CYCLE
+        ):
+            # Answered and closed on the disposition's coded
+            # rationale — the cycle's documentation on the clock.
+            if as_of <= review_due_on:
+                operative, kind = review_due_on, "continuing_review"
+            else:
+                operative, kind = filing_due_on, "continuing_filing"
             state, remaining = ClockState.CLOSED_NO_FILE, None
+            review_late = as_of > review_due_on
+        elif (
+            disposition is not None
+            and disposition.outcome is ReviewOutcome.FILE_CONTINUING
+        ):
+            # Answered: a continuing filing is due. The cycle
+            # stays live against the filing deadline — and only
+            # the filing itself satisfies it.
+            operative, kind = filing_due_on, "continuing_filing"
+            if case.status is CaseStatus.FILED_SAR:
+                state, remaining = ClockState.SATISFIED, None
+                review_late = False
+            else:
+                state = live_state(as_of, filing_due_on)
+                remaining = (filing_due_on - as_of).days
+                review_late = disposition.decided_at.date() > review_due_on
         else:
-            state = live_state(as_of, operative)
-            remaining = (operative - as_of).days
+            # Unanswered — R8's derivation exactly: the case's own
+            # endings close the clock, else it stands live, and a
+            # review opened but not dispositioned changes nothing.
+            no_file = self._no_file_disposition(case)
+            if as_of <= review_due_on:
+                operative, kind = review_due_on, "continuing_review"
+            else:
+                operative, kind = filing_due_on, "continuing_filing"
+            if case.status is CaseStatus.FILED_SAR:
+                state, remaining = ClockState.SATISFIED, None
+            elif no_file is not None:
+                state, remaining = ClockState.CLOSED_NO_FILE, None
+            else:
+                state = live_state(as_of, operative)
+                remaining = (operative - as_of).days
+            review_late = as_of > review_due_on
         return ContinuingActivityClock(
             case_id=case.case_id,
             prior_case_id=link.prior_case_id,
             customer_id=case.customer_id,
-            determination_on=link.determination_on,
-            review_due_on=link.review_due_on,
-            filing_due_on=link.filing_due_on,
-            review_overdue=review_overdue and state in _LIVE_STATES,
+            determination_on=determination_on,
+            review_due_on=review_due_on,
+            filing_due_on=filing_due_on,
+            review_overdue=review_late and state in _LIVE_STATES,
             operative_deadline=operative,
             operative_deadline_kind=kind,
             state=state,
             days_remaining=remaining,
             as_of=as_of,
             link_evidence_seq=self._continuing_link_seq(case.case_id),
+            cycle=cycle,
+            prior_review_id=prior_review_id,
+            answered_by_review_id=answered_by,
+            answered_outcome=answered_outcome,
         )
+
+    def continuing_cycles(
+        self, case: Case, *, as_of: date
+    ) -> list[ContinuingActivityClock]:
+        """Every cycle's clock, oldest first — the answered
+        cycles with the review that answered them, the live
+        cycle last. Empty when no continuing clock was started."""
+        link = self.continuing_link_for(case.case_id)
+        if link is None:
+            return []
+        clocks: list[ContinuingActivityClock] = []
+        for cycle, determination, prior_review_id in self._cycle_starts(
+            case, link
+        ):
+            review = self._operative_review(case.case_id, cycle)
+            clocks.append(
+                self._cycle_clock(
+                    case,
+                    link,
+                    cycle=cycle,
+                    determination_on=determination,
+                    prior_review_id=prior_review_id,
+                    review=review,
+                    disposition=self._review_disposition(review),
+                    as_of=as_of,
+                )
+            )
+        return clocks
+
+    def continuing_clock(
+        self, case: Case, *, as_of: date
+    ) -> ContinuingActivityClock | None:
+        """The case's live (latest) continuing-activity cycle
+        clock — the derivation the escalation machinery reads."""
+        cycles = self.continuing_cycles(case, as_of=as_of)
+        return cycles[-1] if cycles else None
 
     def case_clocks(self, case_id: str, *, as_of: date) -> CaseClocks:
         case = self._require_case(case_id)
@@ -405,6 +594,7 @@ class RegulatoryClockService:
             as_of=as_of,
             filing=self.filing_clock(case, as_of=as_of),
             continuing_activity=self.continuing_clock(case, as_of=as_of),
+            continuing_history=self.continuing_cycles(case, as_of=as_of),
             escalations=self.recorded_escalations(case_id),
             violations=self._violations(case),
         )

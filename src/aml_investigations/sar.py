@@ -46,6 +46,16 @@ SAR is ever filed by this system.** R6 ends at a verified draft —
 ready for R7's dual-control approval, which is a second person's
 act, and even an approved narrative is a sealed case file, not a
 filing.
+
+**Continuing filings cite the filing they continue (R9).** When
+the escalate_sar disposition that routes the case was minted by a
+file-continuing review disposition, the activity section opens
+with a statement saying so — citing the review disposition, the
+review, the prior case, and the prior case's narrative — so the
+continuing SAR reads as the next filing in a chain, not a fresh
+story. The citation verifier holds that statement to the same
+standard as every other: it stands only because its citations
+resolve to the review and the prior filing it names.
 """
 
 from __future__ import annotations
@@ -85,12 +95,14 @@ from .models import (
     NarrativeSection,
     NarrativeStatement,
     NarrativeVerification,
+    ReviewOutcome,
     SarNarrative,
     StatementVerdict,
 )
 from .ports import (
     ApprovalStore,
     CaseStore,
+    ContinuingReviewStore,
     DispositionStore,
     InvestigationStore,
     SarNarrativeStore,
@@ -157,6 +169,7 @@ class SarNarrativeService:
         evidence: EvidenceService,
         approval_store: ApprovalStore | None = None,
         seal_store: SealStore | None = None,
+        review_store: ContinuingReviewStore | None = None,
     ) -> None:
         self._store = store
         self._records = records
@@ -171,6 +184,11 @@ class SarNarrativeService:
         # case like every other mutating path.
         self._approvals = approval_store
         self._seals = seal_store
+        # R9: when a review store is wired, a draft routed by a
+        # file-continuing review disposition opens its activity
+        # section with a statement citing the review and the prior
+        # filing — the chain made visible in the narrative itself.
+        self._reviews = review_store
         self._resolver = CitationResolver(store, evidence)
 
     # -- refusals -----------------------------------------------------
@@ -317,6 +335,9 @@ class SarNarrativeService:
         composer = get_composer(profile)
         sections = self._compose_sections(
             case, current, alert, subject, composer
+        )
+        sections = self._with_continuing_statement(
+            case, routing, sections, composer
         )
         narrative = SarNarrative(
             case_id=case_id,
@@ -557,6 +578,120 @@ class SarNarrativeService:
         return NarrativeSection(
             key=key, title=_SECTION_TITLES[key], statements=statements
         )
+
+    # -- continuing filings (R9) -----------------------------------
+
+    def _continuing_statement(
+        self,
+        case: Case,
+        routing: DispositionRecord,
+        composer: NarrativeComposer,
+    ) -> NarrativeStatement | None:
+        """The opening statement of a continuing filing, when this
+        draft is one: the routing disposition was minted by a
+        file-continuing review disposition, so the narrative names
+        the chain — review disposition, review, prior case, prior
+        narrative — each cited to the evidence item that records
+        it. Returns None for an ordinary (non-continuing) draft."""
+        if self._reviews is None:
+            return None
+        review_disposition = next(
+            (
+                d
+                for d in self._reviews.list_review_dispositions(
+                    case.case_id
+                )
+                if d.outcome is ReviewOutcome.FILE_CONTINUING
+                and d.case_disposition_id == routing.disposition_id
+            ),
+            None,
+        )
+        if review_disposition is None:
+            return None
+        review = self._reviews.get_review(review_disposition.review_id)
+        if review is None or review.evidence_seq is None:
+            return None
+        if (
+            review_disposition.evidence_seq is None
+            or review.prior_narrative_id is None
+        ):
+            return None
+        prior_narratives = self._narratives.list_narratives(
+            review.prior_case_id
+        )
+        prior_narrative = next(
+            (
+                n
+                for n in prior_narratives
+                if n.narrative_id == review.prior_narrative_id
+            ),
+            None,
+        )
+        if prior_narrative is None or prior_narrative.evidence_seq is None:
+            return None
+        values = {
+            "prior_case_id": review.prior_case_id,
+            "prior_narrative_id": review.prior_narrative_id,
+            "review_id": review.review_id,
+        }
+        citations = [
+            Citation(
+                evidence_seq=review_disposition.evidence_seq,
+                element="field:review_id",
+            ),
+            Citation(
+                evidence_seq=review.evidence_seq,
+                element="field:prior_case_id",
+            ),
+            Citation(
+                case_id=review.prior_case_id,
+                evidence_seq=prior_narrative.evidence_seq,
+                element="field:narrative_id",
+            ),
+        ]
+        return self._templated(
+            composer,
+            template=(
+                "This report continues activity previously "
+                "reported to FinCEN for this subject. It follows "
+                "the completed SAR case file for case "
+                "{prior_case_id}, whose narrative "
+                "{prior_narrative_id} stands approved, and it is "
+                "drafted on the assessment recorded in "
+                "continuing-activity review {review_id}, which "
+                "reviewed the activity in the current window and "
+                "directed a continuing filing."
+            ),
+            values=values,
+            citations=citations,
+            case_id=case.case_id,
+        )
+
+    def _with_continuing_statement(
+        self,
+        case: Case,
+        routing: DispositionRecord,
+        sections: list[NarrativeSection],
+        composer: NarrativeComposer,
+    ) -> list[NarrativeSection]:
+        """Prepend the continuing-filing statement to the
+        activity section when this draft is a continuing filing;
+        other sections — and ordinary drafts — are untouched."""
+        statement = self._continuing_statement(case, routing, composer)
+        if statement is None:
+            return sections
+        rebuilt: list[NarrativeSection] = []
+        for section in sections:
+            if section.key == "activity_summary":
+                rebuilt.append(
+                    self._section(
+                        "activity_summary",
+                        [statement, *section.statements],
+                    )
+                )
+            else:
+                rebuilt.append(section)
+        return rebuilt
 
     def _compose_sections(
         self,
