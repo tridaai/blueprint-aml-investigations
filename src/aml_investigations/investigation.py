@@ -77,6 +77,8 @@ from .models import (
     InvestigationFinding,
     InvestigationRecord,
     ListKind,
+    MediaArticle,
+    MediaAssessment,
     OpenQuestion,
     PriorCaseRef,
     ProfileView,
@@ -91,6 +93,7 @@ from .ports import (
     CaseStore,
     DispositionStore,
     InvestigationStore,
+    MediaStore,
     ScreeningStore,
     SealStore,
     TypologyStore,
@@ -412,6 +415,8 @@ class _State(TypedDict, total=False):
     profile_view_seq: int | None
     screening_run: ScreeningRun | None
     screening_hits: list[ScreeningHit]
+    media_assessments: list[MediaAssessment]
+    media_articles: dict[str, MediaArticle]
     typology_run: TypologyRun | None
     typology_findings: list[TypologyFinding]
     transactions: list[Transaction]
@@ -483,6 +488,17 @@ def _typology_template(finding: TypologyFinding) -> tuple[str, dict[str, str]]:
     return (f"Typology finding under rule {finding.typology_id}.", {})
 
 
+def _media_categories_phrase(assessment: MediaAssessment) -> str:
+    """The assessment's adverse categories as a prose list, from
+    code vocabulary only — category names, never article text."""
+    names = [c.category.replace("_", " ") for c in assessment.categories]
+    if not names:
+        return "none"
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
 def _typology_values(finding: TypologyFinding) -> dict[str, str]:
     """Template values for a typology finding: its figures verbatim
     (amounts exact decimal strings), plus the window dates, which
@@ -508,6 +524,7 @@ def _input_fingerprint(
     screening_store: ScreeningStore,
     typology_store: TypologyStore,
     case: Case,
+    media_store: MediaStore | None = None,
 ) -> str:
     """A fingerprint of everything an investigation reads. Same
     inputs ⇒ same record: re-running an investigation over unchanged
@@ -536,9 +553,17 @@ def _input_fingerprint(
         for c in store.list_cases()
         if c.customer_id == case.customer_id and c.case_id != case.case_id
     )
+    media_ids = (
+        sorted(
+            a.assessment_id for a in media_store.list_assessments(case.case_id)
+        )
+        if media_store is not None
+        else []
+    )
     payload = {
         "alert": alert_hash,
         "has_source_of_funds": bool(kinds & _SOF_KINDS),
+        "media_assessments": media_ids,
         "screening_runs": sorted(r.run_id for r in runs),
         "screening_hits": sorted((h.hit_id, h.status.value) for h in hits),
         "typology_runs": sorted(r.run_id for r in truns),
@@ -619,6 +644,7 @@ class InvestigationService:
         seal_store: SealStore | None = None,
         quarantine=None,
         profile_service=None,
+        media_store: MediaStore | None = None,
     ) -> None:
         self._store = store
         self._screening = screening_store
@@ -646,6 +672,13 @@ class InvestigationService:
         # assembled, provenance-carrying view as well as the raw
         # account profile. With no view stored, nothing changes.
         self._profile_service = profile_service
+        # R12: when a media store is wired, the case's adverse-
+        # media assessments join the record as cited findings —
+        # findings only: they never choose the hypothesis, never
+        # disposition, and their statements carry code-computed
+        # values (band, score, categories) plus the article's
+        # fenced outlet, never article prose.
+        self._media_store = media_store
         self._resolver = CitationResolver(store, evidence)
         builder = StateGraph(_State)
         builder.add_node("assemble", self._assemble)
@@ -679,7 +712,11 @@ class InvestigationService:
             )
         composer = get_composer(profile)
         fingerprint = _input_fingerprint(
-            self._store, self._screening, self._typologies, case
+            self._store,
+            self._screening,
+            self._typologies,
+            case,
+            media_store=self._media_store,
         )
         existing = self._records.list_investigation_records(case_id)
         if (
@@ -757,6 +794,7 @@ class InvestigationService:
                 "alert",
                 "profile",
                 "prior_case",
+                "media",
             ):
                 for name, value in finding.figures.items():
                     if not numeric_tokens(value) <= cited_tokens:
@@ -947,6 +985,25 @@ class InvestigationService:
                     detected_on=prior_alert.detected_on,
                 )
             )
+        media_assessments = (
+            self._media_store.list_assessments(case_id)
+            if self._media_store is not None
+            else []
+        )
+        media_articles: dict[str, MediaArticle] = {}
+        for assessment in media_assessments:
+            if assessment.article_evidence_seq is None:
+                continue
+            try:
+                content = self._evidence.read_item_content(
+                    case_id, assessment.article_evidence_seq
+                )
+                article = MediaArticle.model_validate_json(
+                    content.decode("utf-8")
+                )
+            except Exception:
+                continue
+            media_articles[article.article_id] = article
         return {
             "case": case,
             "alert": alert,
@@ -957,6 +1014,8 @@ class InvestigationService:
             "profile_view_seq": profile_view_seq,
             "screening_run": screening_run,
             "screening_hits": screening_hits,
+            "media_assessments": media_assessments,
+            "media_articles": media_articles,
             "typology_run": typology_run,
             "typology_findings": typology_findings,
             "transactions": transactions,
@@ -1116,6 +1175,81 @@ class InvestigationService:
                             element=f"run:{screening_run.run_id}",
                         )
                     ],
+                )
+            )
+
+        # R12: adverse-media assessments join the record as
+        # findings — findings only. The statement carries
+        # code-computed values (the band, the score, the
+        # categories, the publication date) and the article's
+        # outlet fenced like any untrusted text; article prose
+        # (headline, body) never enters the statement, and the
+        # finding's direction is context: media supports no
+        # hypothesis and dispositions nothing.
+        for assessment in state["media_assessments"]:
+            band = assessment.band.value
+            article = state["media_articles"].get(assessment.article_id)
+            outlet = "an unnamed outlet"
+            if article is not None and assessment.article_evidence_seq:
+                outlet = self._fence(
+                    case_id,
+                    assessment.article_evidence_seq,
+                    "outlet",
+                    article.outlet,
+                )
+            citations: list[Citation] = []
+            if assessment.evidence_seq is not None:
+                citations += [
+                    Citation(
+                        evidence_seq=assessment.evidence_seq,
+                        element="field:band",
+                    ),
+                    Citation(
+                        evidence_seq=assessment.evidence_seq,
+                        element="field:score",
+                    ),
+                    Citation(
+                        evidence_seq=assessment.evidence_seq,
+                        element="field:published_on",
+                    ),
+                ]
+            if assessment.article_evidence_seq is not None:
+                citations.append(
+                    Citation(
+                        evidence_seq=assessment.article_evidence_seq,
+                        element="field:headline",
+                    )
+                )
+            drafts.append(
+                make(
+                    key=f"media:{assessment.article_id}",
+                    kind="media",
+                    origin="media",
+                    weight=(
+                        "high"
+                        if band == "strong"
+                        else "medium"
+                        if band == "possible"
+                        else "low"
+                    ),
+                    direction="context",
+                    template=(
+                        "Adverse-media search returned an article "
+                        "from {outlet} published {published_on}; "
+                        "assessed against the case subject it stands "
+                        "at relevance band {band} with similarity "
+                        "score {score}, and the adverse categories "
+                        "recorded are {categories}."
+                    ),
+                    values={
+                        "outlet": outlet,
+                        "published_on": assessment.published_on.isoformat(),
+                        "band": band,
+                        "score": str(assessment.score),
+                        "categories": _media_categories_phrase(assessment),
+                    },
+                    figures={"score": str(assessment.score)},
+                    citations=citations,
                 )
             )
 
@@ -2257,7 +2391,11 @@ class InvestigationService:
         previous = existing[-1] if existing else None
         version = (previous.version + 1) if previous else 1
         fingerprint = _input_fingerprint(
-            self._store, self._screening, self._typologies, case
+            self._store,
+            self._screening,
+            self._typologies,
+            case,
+            media_store=self._media_store,
         )
         record = InvestigationRecord(
             record_id=f"INV-{case.case_id}-V{version}",

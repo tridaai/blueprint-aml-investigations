@@ -145,6 +145,19 @@ Usage:
     aml-agent shared-counterparties counterparties standing on more
                                     than one customer's cases — the
                                     network view
+    aml-agent media-search <case_id> [--as-of YYYY-MM-DD] [--actor A]
+                                    search the adverse-media port
+                                    for the case's subject; candidate
+                                    articles are ingested as evidence
+                                    and scored in code (R12) —
+                                    findings only, nothing is
+                                    dispositioned
+    aml-agent media-assessments <case_id>
+                                    the case's adverse-media
+                                    assessments, with bands and
+                                    per-signal breakdowns
+    aml-agent media-assessment <case_id> <assessment_id>
+                                    one assessment in detail
 """
 
 from __future__ import annotations
@@ -313,6 +326,15 @@ def main(argv: list[str] | None = None) -> int:
     p_counterparty.add_argument("customer_id")
     p_counterparty.add_argument("name")
     sub.add_parser("shared-counterparties")
+    p_media_search = sub.add_parser("media-search")
+    p_media_search.add_argument("case_id")
+    p_media_search.add_argument("--as-of", default=None)
+    p_media_search.add_argument("--actor", default="media-service")
+    p_media_list = sub.add_parser("media-assessments")
+    p_media_list.add_argument("case_id")
+    p_media_one = sub.add_parser("media-assessment")
+    p_media_one.add_argument("case_id")
+    p_media_one.add_argument("assessment_id")
     args = parser.parse_args(argv)
 
     services = build_services()
@@ -854,6 +876,36 @@ def main(argv: list[str] | None = None) -> int:
                     [s.model_dump(mode="json") for s in shared], indent=2
                 )
             )
+        elif args.command == "media-search":
+            from datetime import date
+
+            as_of = (
+                date.fromisoformat(args.as_of)
+                if args.as_of
+                else date.today()
+            )
+            results = services.media.search_case_media(
+                args.case_id, actor=args.actor, as_of=as_of
+            )
+            print(
+                json.dumps(
+                    [a.model_dump(mode="json") for a in results],
+                    indent=2,
+                )
+            )
+        elif args.command == "media-assessments":
+            results = services.media.list_assessments(args.case_id)
+            print(
+                json.dumps(
+                    [a.model_dump(mode="json") for a in results],
+                    indent=2,
+                )
+            )
+        elif args.command == "media-assessment":
+            assessment = services.media.get_assessment(
+                args.case_id, args.assessment_id
+            )
+            print(json.dumps(assessment.model_dump(mode="json"), indent=2))
     except AmlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

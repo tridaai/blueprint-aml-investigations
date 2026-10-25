@@ -22,8 +22,11 @@ profile surface (R11): assemble a customer's KYC profile view
 from stored artefacts, read it (latest or per case), read its
 version history, and read the counterparty views — per customer,
 one counterparty in detail, and the shared-counterparty network
-view. No endpoint files a SAR — none exists; the blueprint ends
-at an approved, sealed case file.
+view, and the adverse-media surface (R12): search the media port
+for a case's subject (candidates ingested as evidence, scored in
+code), list a case's assessments, and read one in detail. No
+endpoint files a SAR — none exists; the blueprint ends at an
+approved, sealed case file.
 """
 
 from __future__ import annotations
@@ -53,6 +56,8 @@ from .errors import (
     IllegalTransitionError,
     InvestigationError,
     InvestigationStateError,
+    MediaNotFoundError,
+    MediaRefusedError,
     NarrativeNotFoundError,
     NoTransactionsError,
     ProfileNotFoundError,
@@ -296,6 +301,15 @@ class QuarantineReviewRequest(BaseModel):
     note: str = ""
 
 
+class MediaSearchRequest(BaseModel):
+    """Search the adverse-media port for a case's subject (R12).
+    ``as_of`` is the date article ages are computed at; omitted
+    means today."""
+
+    as_of: date | None = None
+    actor: str = Field(default="media-service", min_length=1)
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"detail": message})
 
@@ -447,6 +461,16 @@ def create_app(services: Services | None = None) -> FastAPI:
     @app.exception_handler(ProfileNotFoundError)
     async def _profile_not_found(
         _request: Request, exc: ProfileNotFoundError
+    ):
+        return _error(404, str(exc))
+
+    @app.exception_handler(MediaRefusedError)
+    async def _media_refused(_request: Request, exc: MediaRefusedError):
+        return _error(422, str(exc))
+
+    @app.exception_handler(MediaNotFoundError)
+    async def _media_not_found(
+        _request: Request, exc: MediaNotFoundError
     ):
         return _error(404, str(exc))
 
@@ -1201,6 +1225,45 @@ def create_app(services: Services | None = None) -> FastAPI:
             s.model_dump(mode="json")
             for s in services.profiles.shared_counterparties()
         ]
+
+    # -- adverse-media surface (R12) -------------------------------
+
+    @app.post("/cases/{case_id}/media/search", status_code=201)
+    async def search_media(case_id: str, payload: MediaSearchRequest):
+        """Search the media port for the case's subject, ingest
+        the candidate articles as evidence, and score each in
+        code. Returns the case's assessments, new and already
+        recorded alike. Assessments are findings — this search
+        dispositions nothing and moves no case state."""
+        case_id_var.set(case_id)
+        results = services.media.search_case_media(
+            case_id,
+            actor=payload.actor,
+            as_of=payload.as_of or date.today(),
+        )
+        return [a.model_dump(mode="json") for a in results]
+
+    @app.get("/cases/{case_id}/media/assessments")
+    async def list_media_assessments(case_id: str):
+        """Every adverse-media assessment recorded on the case,
+        with its band, per-signal breakdown, and pinned scorer /
+        taxonomy / profile versions."""
+        case_id_var.set(case_id)
+        return {
+            "case_id": case_id,
+            "assessments": [
+                a.model_dump(mode="json")
+                for a in services.media.list_assessments(case_id)
+            ],
+        }
+
+    @app.get("/cases/{case_id}/media/assessments/{assessment_id}")
+    async def get_media_assessment(case_id: str, assessment_id: str):
+        """One assessment in detail."""
+        case_id_var.set(case_id)
+        return services.media.get_assessment(
+            case_id, assessment_id
+        ).model_dump(mode="json")
 
     return app
 
