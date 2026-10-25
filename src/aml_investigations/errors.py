@@ -106,6 +106,44 @@ class TransactionMismatchError(TypologyError):
     account, or mixed accounts inside one batch."""
 
 
+class InvestigationError(AmlError):
+    """Base class for investigation-graph (R4) refusals."""
+
+
+class InvestigationStateError(InvestigationError):
+    """An investigation run was requested for a case that is not in
+    the ``investigating`` state. The graph works a case that is
+    being investigated; it does not reach into opened, assembling,
+    or decided cases."""
+
+
+class CitationResolutionError(InvestigationError):
+    """A citation does not resolve: the evidence item does not
+    exist, or the named element is not inside it. A finding whose
+    citations do not resolve is refused at record time — this error
+    is that refusal, and nothing is persisted when it is raised."""
+
+
+class ComposerRefusalError(InvestigationError):
+    """The narrative composer refused a statement: it would carry a
+    figure that is not in the cited records or the finding's own
+    code-computed figures. The composer assembles text from records;
+    it does not invent figures."""
+
+
+class ModelProfileNotConfiguredError(InvestigationError):
+    """A live model profile was selected but is not configured in
+    this deployment (no key). The profile interface exists; until a
+    key is wired, selecting it is a loud refusal, never a silent
+    fall-back to the offline composer."""
+
+
+class InvestigationRefusedError(InvestigationError):
+    """The assembled investigation record failed the record-time
+    verification gate (citation resolution, figure provenance, or
+    hypothesis discipline). Nothing is persisted."""
+
+
 class SanctionsHitBlocksCloseError(IllegalTransitionError):
     """A plain close was attempted on a case with an unresolved
     sanctions hit. The case is in a must-escalate posture: the lawful
