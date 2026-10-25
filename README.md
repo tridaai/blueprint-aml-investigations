@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R1 of 20)
+## What is built at this round (R3 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -82,11 +82,30 @@ docker compose up --build
 - **FastAPI surface** — `/health`, `/readiness`, alert intake, case
   reads/transitions, evidence add/list/verify, audit read; structured
   JSON logs with request and case IDs.
+- **Screening on version-pinned snapshots (R2)** — sanctions/PEP/
+  adverse-media lists ingested as immutable, content-hashed
+  snapshots; a case's screening runs against an explicitly pinned
+  set of snapshot versions and refuses to run unpinned. A new list
+  version delta-re-screens open cases that ran on older pins and
+  flags them stale; a case with an unresolved sanctions hit cannot
+  be plainly closed — escalation is the only lawful exit.
+- **Typology engine (R3)** — transactions enter a case only as
+  evidence-backed batches (each batch lands on the hash chain), and
+  five deterministic checks run over the stored records: structuring
+  (same-day and multi-day variants), velocity against the account's
+  own baseline, dormancy-then-burst, round-amount dominance, and
+  rapid in-out with per-cent retention. Every figure is an exact
+  Decimal computed in code — the model never computes money. Rules
+  live in immutable, versioned rule packs; every finding records
+  its pack version, and re-running the same pack over the same
+  evidence is idempotent. The reference transaction feed ships the
+  Harborline streams the seed alerts point at, planted patterns and
+  clean controls included.
 
-The investigation itself — screening snapshots, the typology engine,
-cited findings, disposition drafting, SAR narrative + citation
-verification, dual-control approval, regulatory clocks — lands in
-rounds R2–R9 per the round map in `docs/architecture.md`.
+The rest of the investigation — cited findings, disposition
+drafting, SAR narrative + citation verification, dual-control
+approval, regulatory clocks — lands in rounds R4–R9 per the round
+map in `docs/architecture.md`.
 
 ## Configuration
 
@@ -98,19 +117,25 @@ rounds R2–R9 per the round map in `docs/architecture.md`.
 | `S3_BUCKET` | `aml-evidence` | Evidence bucket |
 | `OBJECT_STORE_DIR` | `./data/evidence-objects` | Filesystem object store when no S3 endpoint is set |
 | `SEED_ALERTS_PATH` | `./data/seed_alerts.json` | Reference alert feed |
+| `TRANSACTION_STREAMS_PATH` | `./data/transaction_streams.json` | Reference transaction feed (full-history streams) |
+| `TYPOLOGY_RULES_PATH` | `./data/typology_rules.json` | Reference typology rule-pack feed |
 | `MIGRATIONS_DIR` | `./migrations` | Numbered SQL migrations |
 | `LOG_LEVEL` | `INFO` | Log level |
 
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, API, SQL store
-make evals   # R1 eval gate — zero-tolerance counters must stay 0
+make test    # pytest — state machine, hash chain, intake, screening, typologies, API, SQL store
+make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 
-Eval counters at R1: cases closed without an analyst disposition (0),
-unlawful transitions accepted (0), evidence chains failing
-verification (0), duplicate cases per alert (0), audit gaps (0).
+Eval counters include: cases closed without an analyst disposition
+(0), unlawful transitions accepted (0), evidence chains failing
+verification (0), duplicate cases per alert (0), audit gaps (0),
+screening runs accepted without a pin (0), stale screenings left
+unflagged (0), planted typologies missed (0), typology false fires
+on control accounts (0), typology figure mismatches (0), typology
+runs not idempotent (0), findings without their rule version (0).
 
 ## Honest status
 

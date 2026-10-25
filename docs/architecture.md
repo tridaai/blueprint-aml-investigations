@@ -26,10 +26,12 @@ monitoring system ──(AlertSource port)──▶ intake ──▶ case opened
 At R1 the spine exists end to end: intake, the case state machine,
 the evidence store with its hash chain, the audit log, and the API.
 R2 added screening on top of it: version-pinned list snapshots,
-delta re-screening, and the sanctions must-escalate guard. Rounds
-R3–R20 fill in the remaining investigation stages behind the same
-case and evidence model; the round map is at the bottom of this
-document.
+delta re-screening, and the sanctions must-escalate guard. R3 added
+the typology engine: evidence-backed transaction ingestion and five
+deterministic money-computation checks under versioned rule packs.
+Rounds R4–R20 fill in the remaining investigation stages behind the
+same case and evidence model; the round map is at the bottom of
+this document.
 
 ## Case state machine (LangGraph)
 
@@ -137,6 +139,75 @@ delta → hit on re-screen → close refused) with the counters
 `screening_without_pin`, `stale_screening_unflagged`, and
 `sanctions_close_blocked_violations` all at zero tolerance.
 
+## Typology engine (R3) — Law 4, in code
+
+The typology engine is the blueprint's money arithmetic, and it is
+entirely deterministic code: no model computes, rounds, or estimates
+a figure anywhere in this layer. A language model may later (R4)
+narrate what the engine found; it never decides what the numbers
+are.
+
+**Transactions are evidence first.** A case's subject-account
+transactions enter only through ingestion: each batch is stored as
+transaction records and captured as a `transaction_batch` evidence
+item whose content is the canonical serialization of the batch, so
+the hash chain covers the exact records the engine later reads. The
+engine reads only stored records — there is no path that runs a
+check over ad-hoc input. The transaction feed contract is a
+**full-history stream**: the account's transactions from opening,
+which is what lets dormancy measure the gap from `opened_on` and
+velocity build a baseline. A reference feed ships the Harborline
+streams in which the R1 seed alerts' patterns are actually planted.
+
+**Five checks**, each a pure function over the stored transactions
+and the account profile, returning findings that name the exact
+transaction ids involved and carry every computed figure as an exact
+decimal string:
+
+- **Structuring** — cash transactions inside the near-threshold band
+  (default 9,000 to just under the 10,000 CTR threshold), aggregated
+  per direction. A same-calendar-day group of at least the minimum
+  count totalling at least the threshold fires as `same_day` and
+  claims its transactions; overlapping multi-day windows (default 7
+  days) over the remainder merge into `multi_day` findings.
+- **Velocity** — the trailing observation window (default 7 days)
+  against the account's own baseline (everything earlier, requiring
+  at least 60 days of history). Fires on the transaction-count
+  multiple (default 5×); amounts and daily rates are reported
+  alongside so an analyst sees scale, not just frequency.
+- **Dormancy-then-burst** — a gap of at least 180 days between
+  activity boundaries (the account's opening date is the first
+  boundary), followed by a burst of at least two transactions
+  totalling at least 5,000 within three days of resumption.
+- **Round-amount** — transactions at or above 5,000 that are exact
+  multiples of the round unit (default 1,000) must also dominate:
+  at least five of them, at least half the stream, at least 25,000
+  in total. Any one test alone is ordinary business.
+- **Rapid in-out** — each credit of at least 10,000 opens a lot;
+  debits inside the following 72 hours are allocated to the oldest
+  open lot first. A lot fires when at least 90% passed through, and
+  the finding reports the retained remainder to the cent.
+
+**Rule packs are versioned data.** Every threshold above lives in a
+rule pack (`pack_id` + `version`), content-hashed at registration.
+A pack, once registered, is immutable: changing a threshold means
+registering a new version, never editing the old one — and every
+finding records the pack id and version that produced it, so
+findings from different versions coexist and stay distinguishable.
+Runs are idempotent by construction: a run is keyed by an input
+fingerprint (the stored transaction ids, their batch hashes, the
+account profile, and the pack's content hash), so re-running the
+same pack over the same evidence returns the existing run instead
+of duplicating findings, while a new pack version produces a new,
+distinguishable run. Each run's findings are also captured as a
+`typology_findings` evidence item on the case.
+
+**Negative controls are graded, not assumed.** The eval gate runs a
+business that deposits 9,500 in cash every ten days for months —
+inside the band every time, never aggregated — and any finding on a
+control account fails the gate outright (zero tolerance), alongside
+exact-set and exact-figure checks on every planted pattern.
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
@@ -146,7 +217,10 @@ in both dialects; filterable columns (status, severity, detection
 date) are broken out. Schema changes are numbered SQL files under
 `migrations/<dialect>/`, applied in order by the startup runner and
 recorded in `schema_migrations`. Migration 0002 added the screening
-tables (`list_snapshots`, `screening_runs`, `screening_hits`).
+tables (`list_snapshots`, `screening_runs`, `screening_hits`);
+migration 0003 added the typology tables (`rule_packs`,
+`account_profiles`, `transaction_batches`, `transactions`,
+`typology_runs`, `typology_findings`).
 Later rounds add: LangGraph checkpointing on Postgres, pgvector for
 adverse-media similarity (R12), and the clock/scheduler tables (R8).
 
@@ -159,6 +233,9 @@ adverse-media similarity (R12), and the clock/scheduler tables (R8).
 | `ObjectStore` | S3-compatible (SeaweedFS in compose) | local filesystem |
 | `ScreeningListSource` | licensed list feed (OFAC/PEP/media) | reference JSON feed |
 | `ScreeningStore` | PostgreSQL via migrations | SQLite file; in-memory |
+| `TransactionSource` | core-banking full-history stream | reference JSON feed |
+| `RulePackSource` | governed rule-pack distribution | reference JSON feed |
+| `TypologyStore` | PostgreSQL via migrations | SQLite file; in-memory |
 
 The model gateway (R13) and adverse media (R12) arrive as further
 ports behind the same discipline: decisions in code, citations on
@@ -173,7 +250,9 @@ everything, untrusted input quarantined (Law 7).
 3. Screening is version-pinned; new list versions trigger delta
    re-screening of open cases — snapshots, pins, delta flags, and
    the sanctions close-guard (R2) ✓
-4. The model never computes money; typologies are code — R3.
+4. The model never computes money; typologies are code — five
+   deterministic checks over evidence-backed transactions, under
+   immutable versioned rule packs (R3) ✓
 5. Evidence is immutable and hash-chained — evidence service (R1) ✓
 6. Regulatory clocks are code (SAR 30/60-day, continuing-activity
    90/120-day) — detection date stamped at intake (R1) ✓, clocks R8/R9.
