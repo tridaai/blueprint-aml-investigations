@@ -34,6 +34,12 @@ Zero-tolerance counters:
   - free-text-only rationale accepted (R5) ......... must be 0
   - stale dispositions left unflagged (R5) ......... must be 0
   - superseded-record citations accepted (R5) ...... must be 0
+  - wrong clock deadlines computed (R8) ............ must be 0
+  - wrong clock boundary states (R8) ............... must be 0
+  - overdue clocks missing from the queue (R8) ..... must be 0
+  - ended clocks still escalated (R8) .............. must be 0
+  - duplicate escalation events recorded (R8) ...... must be 0
+  - terminal-without-disposition undetected (R8) ... must be 0
   - SAR drafts for non-sar_pending cases (R6) ...... must be 0
   - unverifiable statements marked verified (R6).. must be 0
   - figures outside the cited records accepted (R6)  must be 0
@@ -62,6 +68,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from aml_investigations.approval import SarApprovalService  # noqa: E402
+from aml_investigations.clocks import RegulatoryClockService  # noqa: E402
 from aml_investigations.composer import numeric_tokens, tokens_of  # noqa: E402
 from aml_investigations.dispositions import (  # noqa: E402
     FLAG_DISPOSITION_STALE,
@@ -93,10 +100,13 @@ from aml_investigations.models import (  # noqa: E402
     AccountProfile,
     Alert,
     ApprovalOutcome,
+    Case,
     CaseStatus,
+    ClockState,
     ConfirmationOutcome,
     Disposition,
     DispositionOutcome,
+    DispositionRecord,
     HitStatus,
     ListEntry,
     ListKind,
@@ -299,6 +309,17 @@ def main() -> int:
         "tampered_export_verified": 0,
         "seal_incomplete_accepted": 0,
         "r7_positive_paths_failed": 0,
+        # R8 regulatory clock counters
+        "clock_cases_graded": 0,
+        "clock_wrong_deadline": 0,
+        "clock_state_wrong": 0,
+        "clock_overdue_missing_from_queue": 0,
+        "clock_terminal_still_escalated": 0,
+        "clock_duplicate_escalation_events": 0,
+        "clock_terminal_violation_undetected": 0,
+        "clock_escalations_recorded": 0,
+        "clock_continuing_clocks_started": 0,
+        "clock_positive_paths_failed": 0,
     }
 
     store = InMemoryCaseStore()
@@ -1657,7 +1678,320 @@ def main() -> int:
     except Exception:
         counters["chains_failed"] += 1
 
-    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7 counters")
+    # -- Scenario 11 (R8): regulatory clocks + escalation. ----------
+    # Deadlines are graded against a literal table (day 30, day 60,
+    # leap-year February, month-end detection) for identified and
+    # unidentified subjects alike; boundary states land on the
+    # exact days; the SAR and no-file lifecycles end their clocks
+    # the documented way; a reopened case's clock is live again; a
+    # new alert on a filed customer starts the continuing-activity
+    # clock at intake; escalation crossings are recorded once; and
+    # a terminal case with no disposition anywhere is reported as
+    # a violation, not a silence.
+    clocks = RegulatoryClockService(
+        store, store, store, evidence, approvals=store
+    )
+
+    # 11a: the graded deadline table. Cases are written straight
+    # to the store with their alert payload evidence — the facts
+    # a filing clock reads — and graded for both subject states.
+    deadline_table = [
+        (date(2026, 10, 20), date(2026, 11, 19), date(2026, 12, 19)),
+        (date(2026, 1, 31), date(2026, 3, 2), date(2026, 4, 1)),
+        (date(2024, 2, 29), date(2024, 3, 30), date(2024, 4, 29)),
+        (date(2023, 2, 28), date(2023, 3, 30), date(2023, 4, 29)),
+        (date(2026, 12, 15), date(2027, 1, 14), date(2027, 2, 13)),
+    ]
+    boundary_case = None
+    for i, (detected, initial, outer) in enumerate(deadline_table):
+        for identified in (True, False):
+            graded = Case(
+                alert_id=f"EVAL-CLK-{i}-{identified}",
+                customer_id="CUST-CLK",
+                account_id="ACCT-CLK",
+                rule_id="TM-CLOCK-01",
+                detected_on=detected,
+            )
+            store.create_case(graded)
+            if identified:
+                payload = Alert(
+                    alert_id=graded.alert_id,
+                    rule_id=graded.rule_id,
+                    customer_id=graded.customer_id,
+                    account_id=graded.account_id,
+                    detected_on=detected,
+                    raw={
+                        "customer_name": "Eval Subject",
+                        "customer_dob": "1980-01-01",
+                        "customer_identifiers": ["PP-EV-0001"],
+                    },
+                )
+                evidence.add_item(
+                    graded.case_id,
+                    kind="alert_payload",
+                    content=payload.model_dump_json(indent=2).encode("utf-8"),
+                    source_ref=f"monitoring-feed:{graded.alert_id}",
+                    captured_by="eval",
+                )
+            clock = clocks.filing_clock(
+                store.get_case(graded.case_id), as_of=detected
+            )
+            counters["clock_cases_graded"] += 1
+            if (
+                clock.initial_deadline != initial
+                or clock.outer_deadline != outer
+                or clock.subject_identified is not identified
+                or clock.operative_deadline
+                != (initial if identified else outer)
+            ):
+                counters["clock_wrong_deadline"] += 1
+            if i == 0 and identified:
+                boundary_case = store.get_case(graded.case_id)
+
+    # 11b: boundary states on the 2026-10-20 identified case
+    # (initial deadline 2026-11-19).
+    for as_of, expected in (
+        (date(2026, 11, 11), ClockState.ON_TRACK),   # 8 days left
+        (date(2026, 11, 12), ClockState.DUE_SOON),   # exactly 7
+        (date(2026, 11, 19), ClockState.DUE),        # day 30
+        (date(2026, 11, 20), ClockState.OVERDUE),    # day 31
+    ):
+        state = clocks.filing_clock(boundary_case, as_of=as_of).state
+        if state is not expected:
+            counters["clock_state_wrong"] += 1
+
+    # 11c: lifecycles on the main stack. inv1 closed in 8a through
+    # a confirmed close_no_action: its clock ends closed_no_file
+    # naming that disposition and its coded rationale. The benign
+    # EVAL-003 close (8b) ends the same way. inv3 was monitored
+    # (8c) and then escalated — its latest disposition is not a
+    # closure, so its clock is live again.
+    inv1_clock = clocks.case_clocks(inv1, as_of=date(2026, 12, 1))
+    if (
+        inv1_clock.filing.state is not ClockState.CLOSED_NO_FILE
+        or inv1_clock.filing.no_file_disposition_id
+        != parked.disposition_id
+        or inv1_clock.filing.no_file_rationale_codes
+        != ["BENIGN_EXPLANATION_DOCUMENTED"]
+        or inv1_clock.violations
+    ):
+        counters["clock_positive_paths_failed"] += 1
+    bare_clock = clocks.case_clocks(bare, as_of=date(2026, 12, 1))
+    if (
+        bare_clock.filing.state is not ClockState.CLOSED_NO_FILE
+        or bare_clock.filing.no_file_disposition_id
+        != closed.disposition_id
+    ):
+        counters["clock_positive_paths_failed"] += 1
+    inv3_clock = clocks.case_clocks(inv3, as_of=date(2026, 12, 1))
+    if inv3_clock.filing.state is ClockState.CLOSED_NO_FILE:
+        counters["clock_positive_paths_failed"] += 1
+
+    # The seed case reached filed_sar in scenario 10: satisfied,
+    # and documented — no violation on a sealed, filed file.
+    s_clocks = RegulatoryClockService(
+        s_store, s_store, s_store, s_evidence, approvals=s_store
+    )
+    shipped_clock = s_clocks.case_clocks(shipped, as_of=date(2027, 1, 1))
+    if (
+        shipped_clock.filing.state is not ClockState.SATISFIED
+        or shipped_clock.violations
+    ):
+        counters["clock_positive_paths_failed"] += 1
+
+    # 11d: the continuing-activity trigger, on its own stack. A
+    # prior case filed with a determination on 2026-09-01; a new
+    # alert for the same customer starts the 90/120-day clock at
+    # intake; another customer's alert starts nothing.
+    k_store = InMemoryCaseStore()
+    k_evidence = EvidenceService(
+        k_store,
+        LocalObjectStore(Path(tempfile.mkdtemp(prefix="aml-evals-clocks-"))),
+        seal_store=k_store,
+    )
+    k_clocks = RegulatoryClockService(
+        k_store, k_store, k_store, k_evidence, approvals=k_store
+    )
+    k_intake = IntakeService(
+        k_store,
+        ListAlertFeed([
+            Alert(
+                alert_id="EVAL-K-NEW", rule_id="TM-VELOCITY-03",
+                customer_id="CUST-K1", account_id="ACCT-K1",
+                severity="medium", detected_on="2026-10-24",
+                summary="New activity on a filed subject.",
+            ),
+            Alert(
+                alert_id="EVAL-K-OTHER", rule_id="TM-VELOCITY-03",
+                customer_id="CUST-K2", account_id="ACCT-K2",
+                severity="low", detected_on="2026-10-24",
+                summary="A customer with no filed history.",
+            ),
+        ]),
+        k_evidence,
+        clock_service=k_clocks,
+    )
+    prior = Case(
+        alert_id="EVAL-K-PRIOR",
+        customer_id="CUST-K1",
+        account_id="ACCT-K1",
+        rule_id="TM-STRUCTURING-01",
+        detected_on=date(2026, 8, 2),
+        status=CaseStatus.FILED_SAR,
+        disposition=Disposition(
+            analyst="e.okafor",
+            decision="file_sar",
+            reason_code="STRUCTURING_CONFIRMED",
+            decided_at=datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc),
+        ),
+    )
+    k_store.create_case(prior)
+    new_case = k_intake.open_case("EVAL-K-NEW")
+    link = k_clocks.continuing_link_for(new_case.case_id)
+    if (
+        link is None
+        or link.prior_case_id != prior.case_id
+        or link.determination_on != date(2026, 9, 1)
+        or link.review_due_on != date(2026, 11, 30)
+        or link.filing_due_on != date(2026, 12, 30)
+    ):
+        counters["clock_positive_paths_failed"] += 1
+    else:
+        counters["clock_continuing_clocks_started"] += 1
+    at_review = k_clocks.case_clocks(new_case.case_id, as_of=date(2026, 11, 30))
+    if (
+        at_review.continuing_activity is None
+        or at_review.continuing_activity.state is not ClockState.DUE
+        or at_review.continuing_activity.operative_deadline_kind
+        != "continuing_review"
+    ):
+        counters["clock_positive_paths_failed"] += 1
+    past_filing = k_clocks.case_clocks(new_case.case_id, as_of=date(2026, 12, 31))
+    if (
+        past_filing.continuing_activity is None
+        or past_filing.continuing_activity.state is not ClockState.OVERDUE
+    ):
+        counters["clock_positive_paths_failed"] += 1
+    other = k_intake.open_case("EVAL-K-OTHER")
+    if k_clocks.continuing_link_for(other.case_id) is not None:
+        counters["clock_positive_paths_failed"] += 1
+
+    # 11e: the escalation queue and the recorded crossings. An
+    # overdue case and a due-soon case stand in the queue in that
+    # order; the filed prior and a documented closed case do not
+    # stand in it at all; refreshing the overdue case twice
+    # records exactly one crossing.
+    over_case = Case(
+        alert_id="EVAL-K-OVER",
+        customer_id="CUST-K3",
+        account_id="ACCT-K3",
+        rule_id="TM-CLOCK-01",
+        detected_on=date(2026, 8, 1),  # outer deadline 2026-09-30
+    )
+    k_store.create_case(over_case)
+    soon_case = Case(
+        alert_id="EVAL-K-SOON",
+        customer_id="CUST-K4",
+        account_id="ACCT-K4",
+        rule_id="TM-CLOCK-01",
+        detected_on=date(2026, 10, 2),
+    )
+    k_store.create_case(soon_case)
+    k_evidence.add_item(
+        soon_case.case_id,
+        kind="alert_payload",
+        content=Alert(
+            alert_id=soon_case.alert_id,
+            rule_id=soon_case.rule_id,
+            customer_id=soon_case.customer_id,
+            account_id=soon_case.account_id,
+            detected_on=date(2026, 10, 2),
+            raw={
+                "customer_name": "Soon Subject",
+                "customer_dob": "1975-05-05",
+            },
+        ).model_dump_json(indent=2).encode("utf-8"),
+        source_ref="monitoring-feed:EVAL-K-SOON",
+        captured_by="eval",
+    )  # identified: initial deadline 2026-11-01, 7 days out at as_of
+    closed_case = Case(
+        alert_id="EVAL-K-CLOSED",
+        customer_id="CUST-K5",
+        account_id="ACCT-K5",
+        rule_id="TM-CLOCK-01",
+        detected_on=date(2026, 8, 1),
+        status=CaseStatus.CLOSED,
+        disposition=Disposition(
+            analyst="e.okafor",
+            decision="close",
+            reason_code="NO_SUSPICIOUS_ACTIVITY_IDENTIFIED",
+            decided_at=datetime(2026, 9, 15, tzinfo=timezone.utc),
+        ),
+    )
+    k_store.create_case(closed_case)
+    k_store.add_disposition(
+        DispositionRecord(
+            case_id=closed_case.case_id,
+            analyst_id="e.okafor",
+            analyst_role="analyst",
+            outcome=DispositionOutcome.CLOSE_NO_ACTION,
+            rationale_codes=["NO_SUSPICIOUS_ACTIVITY_IDENTIFIED"],
+            rationale_vocabulary_version="2026.10.1",
+            record_id="inv-k",
+            record_version=1,
+            decided_at=datetime(2026, 9, 15, tzinfo=timezone.utc),
+        )
+    )
+    queue = k_clocks.escalation_queue(as_of=date(2026, 10, 25))
+    queue_ids = [e.case_id for e in queue]
+    over_entries = [e for e in queue if e.case_id == over_case.case_id]
+    if not over_entries or over_entries[0].state is not ClockState.OVERDUE:
+        counters["clock_overdue_missing_from_queue"] += 1
+    soon_entries = [e for e in queue if e.case_id == soon_case.case_id]
+    if not soon_entries or soon_entries[0].state is not ClockState.DUE_SOON:
+        counters["clock_positive_paths_failed"] += 1
+    if (
+        over_case.case_id in queue_ids
+        and soon_case.case_id in queue_ids
+        and queue_ids.index(over_case.case_id)
+        > queue_ids.index(soon_case.case_id)
+    ):
+        counters["clock_positive_paths_failed"] += 1
+    if prior.case_id in queue_ids or closed_case.case_id in queue_ids:
+        counters["clock_terminal_still_escalated"] += 1
+    first = k_clocks.refresh_escalations(
+        over_case.case_id, as_of=date(2026, 10, 25)
+    )
+    second = k_clocks.refresh_escalations(
+        over_case.case_id, as_of=date(2026, 10, 25)
+    )
+    recorded = k_clocks.recorded_escalations(over_case.case_id)
+    counters["clock_escalations_recorded"] += len(recorded)
+    if len(first) != 1 or second != [] or len(recorded) != 1:
+        counters["clock_duplicate_escalation_events"] += 1
+    try:
+        k_evidence.verify_chain(over_case.case_id)
+    except Exception:
+        counters["chains_failed"] += 1
+
+    # 11f: a terminal case with no disposition anywhere on its
+    # record is a clock violation — detected, never silent.
+    forged = Case(
+        alert_id="EVAL-K-FORGED",
+        customer_id="CUST-K6",
+        account_id="ACCT-K6",
+        rule_id="TM-CLOCK-01",
+        detected_on=date(2026, 8, 1),
+        status=CaseStatus.CLOSED,
+    )
+    k_store.create_case(forged)
+    forged_view = k_clocks.case_clocks(forged.case_id, as_of=date(2026, 10, 25))
+    if "terminal_without_disposition" not in forged_view.violations:
+        counters["clock_terminal_violation_undetected"] += 1
+    if forged_view.filing.state is ClockState.CLOSED_NO_FILE:
+        counters["clock_positive_paths_failed"] += 1
+
+    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8 counters")
     for key, value in counters.items():
         print(f"  {key}: {value}")
     zero_tolerance = [
@@ -1706,6 +2040,13 @@ def main() -> int:
         "tampered_export_verified",
         "seal_incomplete_accepted",
         "r7_positive_paths_failed",
+        "clock_wrong_deadline",
+        "clock_state_wrong",
+        "clock_overdue_missing_from_queue",
+        "clock_terminal_still_escalated",
+        "clock_duplicate_escalation_events",
+        "clock_terminal_violation_undetected",
+        "clock_positive_paths_failed",
     ]
     passed = all(counters[k] == 0 for k in zero_tolerance) and counters["cases_opened"] == len(ALERTS)
     print("GATE: PASS" if passed else "GATE: FAIL")
