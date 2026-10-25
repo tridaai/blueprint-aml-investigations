@@ -35,6 +35,24 @@ def _walk_to(services, case_id: str, target: CaseStatus) -> None:
             CaseStatus.INVESTIGATING,
             CaseStatus.ESCALATED,
         ],
+        CaseStatus.PENDING_CONFIRMATION: [
+            CaseStatus.ASSEMBLING,
+            CaseStatus.INVESTIGATING,
+            CaseStatus.AWAITING_ANALYST,
+            CaseStatus.PENDING_CONFIRMATION,
+        ],
+        CaseStatus.SAR_PENDING: [
+            CaseStatus.ASSEMBLING,
+            CaseStatus.INVESTIGATING,
+            CaseStatus.AWAITING_ANALYST,
+            CaseStatus.SAR_PENDING,
+        ],
+        CaseStatus.MONITORING: [
+            CaseStatus.ASSEMBLING,
+            CaseStatus.INVESTIGATING,
+            CaseStatus.AWAITING_ANALYST,
+            CaseStatus.MONITORING,
+        ],
     }[target]
     for step in path:
         services.workflow.transition(case_id, step, actor="investigation-service")
