@@ -15,14 +15,18 @@ from .models import (
     Alert,
     AuditEvent,
     Case,
+    CaseSeal,
+    CaseUnseal,
     DispositionConfirmation,
     DispositionRecord,
     EvidenceItem,
     InvestigationRecord,
+    LegalHoldEvent,
     ListKind,
     ListSnapshot,
     NarrativeVerification,
     RulePack,
+    SarApproval,
     SarNarrative,
     ScreeningHit,
     ScreeningRun,
@@ -284,3 +288,50 @@ class SarNarrativeStore(Protocol):
     def get_verification_for(
         self, narrative_id: str
     ) -> NarrativeVerification | None: ...
+
+
+@runtime_checkable
+class ApprovalStore(Protocol):
+    """Persistence for dual-control SAR approvals (R7).
+
+    Approvals are append-only: a narrative version is decided
+    exactly once, the record is never updated or deleted, and a
+    rejection is answered by a re-draft (a new narrative version
+    with its own decision) — never by editing this one.
+    """
+
+    def add_approval(self, approval: SarApproval) -> SarApproval: ...
+
+    def list_approvals(self, case_id: str) -> list[SarApproval]: ...
+
+    def get_approval(self, approval_id: str) -> SarApproval | None: ...
+
+    def get_approval_for(
+        self, narrative_id: str
+    ) -> SarApproval | None: ...
+
+
+@runtime_checkable
+class SealStore(Protocol):
+    """Persistence for case seals, unseals, and legal-hold events (R7).
+
+    All three are append-only. A seal is never edited or deleted:
+    an unseal is a separate record that lifts it, a reseal is the
+    next seal version, and a hold's state is derived from its
+    latest event. The case's sealed state is likewise derived —
+    the operative seal is the latest seal no unseal lifts.
+    """
+
+    def add_seal(self, seal: CaseSeal) -> CaseSeal: ...
+
+    def list_seals(self, case_id: str) -> list[CaseSeal]: ...
+
+    def get_seal(self, seal_id: str) -> CaseSeal | None: ...
+
+    def add_unseal(self, unseal: CaseUnseal) -> CaseUnseal: ...
+
+    def list_unseals(self, case_id: str) -> list[CaseUnseal]: ...
+
+    def add_hold_event(self, event: LegalHoldEvent) -> LegalHoldEvent: ...
+
+    def list_hold_events(self, case_id: str) -> list[LegalHoldEvent]: ...

@@ -912,10 +912,11 @@ class SarNarrative(BaseModel):
     ``status`` is deliberately not a stored field: standing is
     derived (see ``SarNarrativeService.status_of``) — superseded by
     a newer draft, stale when the record it cites has been
-    superseded, verified when the citation verifier's latest
-    verdict passes every statement, draft otherwise. A narrative
-    in this round is never approved and never filed: approval is
-    R7's dual-control gate, and no SAR is ever filed by this system.
+    superseded, approved or rejected once the dual-control gate
+    (R7) has decided this version, verified when the citation
+    verifier's latest verdict passes every statement, draft
+    otherwise. Approved or not, a narrative is never filed: no SAR
+    is ever filed by this system.
     """
 
     narrative_id: str = Field(default_factory=lambda: _new_id("sar"))
@@ -1005,3 +1006,257 @@ class NarrativeVerification(BaseModel):
         default=None,
         description="Seq of the sar_narrative_verification evidence item.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Dual-control approval, sealing, legal hold, export (R7):
+# Law 2's second half + Law 5's custody completion
+# ---------------------------------------------------------------------------
+
+
+class ApprovalOutcome(str, enum.Enum):
+    """The second person's decision on a verified SAR narrative."""
+
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class SarApproval(BaseModel):
+    """A second person's decision on one SAR narrative version (R7).
+
+    Dual control (Law 2): the approver may be neither the analyst
+    who recorded the escalate_sar disposition nor the actor who
+    drafted the narrative — both refusals are mechanical, at the
+    gate, before anything is recorded. An approval answers exactly
+    one narrative version (pinned here with the record and
+    disposition it was drafted from); a rejection carries coded
+    reasons from a versioned vocabulary and returns the narrative
+    to drafting standing. Approvals are append-only records and
+    hash-chained evidence items (kind ``sar_approval``).
+
+    An approved narrative is still not a filing: **no SAR is ever
+    filed by this system.** Approval completes the case file; the
+    file is then sealed (see :class:`CaseSeal`).
+    """
+
+    approval_id: str = Field(default_factory=lambda: _new_id("appr"))
+    case_id: str
+    narrative_id: str = Field(
+        description="The narrative version this decision answers. "
+        "A narrative version is decided exactly once."
+    )
+    narrative_version: int = Field(ge=1)
+    record_id: str = Field(
+        description="The investigation record the narrative was drafted from."
+    )
+    record_version: int = Field(ge=1)
+    disposition_id: str = Field(
+        description="The escalate_sar disposition that routed the case. "
+        "Its analyst is barred from approving (dual control)."
+    )
+    approver_id: str = Field(min_length=1)
+    approver_role: str = Field(
+        description="Coded role: analyst | senior_analyst | l2_reviewer."
+    )
+    outcome: ApprovalOutcome
+    reason_codes: list[str] = Field(
+        default_factory=list,
+        description="Rejection only: coded reasons from the versioned "
+        "vocabulary. An approval carries none — free text never "
+        "substitutes for codes, and codes never decorate an approval.",
+    )
+    reason_vocabulary_version: str = Field(
+        default="",
+        description="Vocabulary version the rejection codes were "
+        "drawn from. Empty for approvals.",
+    )
+    note: str = Field(
+        default="",
+        description="Free-text supplement. Never a substitute for codes.",
+    )
+    decided_at: datetime = Field(default_factory=_utcnow)
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the sar_approval evidence item holding this record.",
+    )
+
+
+class SealManifestItem(BaseModel):
+    """One evidence item as a seal certifies it: its position, its
+    kind, and the two hashes the chain binds it with."""
+
+    seq: int = Field(ge=1)
+    kind: str
+    content_sha256: str
+    chain_hash: str
+
+
+class ArtefactPin(BaseModel):
+    """One case artefact as a seal manifest references it: the
+    artefact kind, its id, its version where it has one, and a
+    short detail (an outcome, a verdict) where that is the fact
+    the seal certifies."""
+
+    kind: str = Field(
+        description="investigation_record | disposition | sar_narrative | "
+        "sar_narrative_verification | sar_approval"
+    )
+    artefact_id: str
+    version: int | None = None
+    detail: str = ""
+
+
+class CaseSealManifest(BaseModel):
+    """What a seal certifies, in full.
+
+    The manifest lists *every* evidence item on the case at seal
+    time (seq, kind, content hash, chain hash), the chain head
+    those items produce, and the case's operative artefacts
+    (record, dispositions, narrative, verification, approval) by
+    id and version. The seal's hash is computed over this
+    manifest's canonical JSON — an export package that drops,
+    alters, or adds an item cannot reproduce it.
+    """
+
+    case_id: str
+    chain_head_hash: str = Field(
+        description="The case's evidence chain head at seal time — "
+        "the hash the manifest's items recompute to. The seal's own "
+        "evidence item extends the chain by one beyond this head."
+    )
+    items: list[SealManifestItem] = Field(default_factory=list)
+    artefacts: list[ArtefactPin] = Field(default_factory=list)
+
+
+class CaseSeal(BaseModel):
+    """One sealing of one case file (R7).
+
+    Sealing is a named officer's act over a case in a terminal
+    state (``closed``, or ``filed_sar`` once its narrative stands
+    approved). The seal certifies the manifest with a hash; from
+    that moment the case file is read-only — every mutating
+    service path refuses on it — until a named officer unseals it
+    with a coded reason. Seals are append-only: a reseal after an
+    unseal is the next seal version, and earlier seals stay in the
+    history exactly as recorded. The seal is also a hash-chained
+    evidence item (kind ``case_seal``).
+
+    Retention is stated on the seal: the BSA five-year basis, the
+    retention date it produces, and the legal-hold state at seal
+    time. Retention never authorises destruction in this system —
+    no purge path exists anywhere in the blueprint, and a legal
+    hold would bar one if it ever did.
+    """
+
+    seal_id: str = Field(default_factory=lambda: _new_id("seal"))
+    case_id: str
+    version: int = Field(ge=1, description="Seal version for the case: 1, 2, ...")
+    sealed_by: str = Field(min_length=1)
+    sealed_role: str = Field(
+        description="Coded officer role: senior_analyst | l2_reviewer."
+    )
+    sealed_at: datetime = Field(default_factory=_utcnow)
+    purpose: str = Field(
+        default="custody",
+        description="custody | archive. An archive seal is refused "
+        "while a legal hold stands on the case.",
+    )
+    manifest: CaseSealManifest
+    seal_hash: str = Field(
+        description="SHA-256 over the manifest's canonical JSON — "
+        "the seal's certificate over everything the manifest lists."
+    )
+    retention_basis: str = Field(
+        description="The retention rule the seal records, in words "
+        "(BSA five-year retention posture)."
+    )
+    retention_until: date = Field(
+        description="Sealed date + five years: the date through "
+        "which the sealed file is retained under the stated basis."
+    )
+    legal_hold: bool = Field(
+        default=False,
+        description="The case's legal-hold state at seal time. A "
+        "hold suspends any archive or purge consequence of retention.",
+    )
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the case_seal evidence item holding this record.",
+    )
+
+
+class CaseUnseal(BaseModel):
+    """A named officer lifting one seal, with a coded reason (R7).
+
+    Unsealing never edits or removes the seal it lifts: it is its
+    own append-only record (and a hash-chained evidence item, kind
+    ``case_unseal``), and the seal history keeps both. While
+    unsealed, the case is mutable again — and a later reseal
+    certifies the file as it then stands, as the next seal version.
+    """
+
+    unseal_id: str = Field(default_factory=lambda: _new_id("unseal"))
+    case_id: str
+    seal_id: str = Field(description="The seal this unseal lifts.")
+    unsealed_by: str = Field(min_length=1)
+    unsealed_role: str = Field(
+        description="Coded officer role: senior_analyst | l2_reviewer."
+    )
+    reason_code: str = Field(
+        description="Coded reason from the unseal vocabulary."
+    )
+    note: str = ""
+    unsealed_at: datetime = Field(default_factory=_utcnow)
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the case_unseal evidence item holding this record.",
+    )
+
+
+class LegalHoldEvent(BaseModel):
+    """One placing or releasing of a legal hold on a case (R7).
+
+    A legal hold is placed and released by a named officer, with a
+    coded reason each way; the events are append-only and
+    hash-chained (kind ``legal_hold``), and the case's hold state
+    is derived from the latest event. A hold in force bars an
+    archive seal, suspends any retention consequence, and would
+    bar any purge path — none exists in this system, and the hold
+    is recorded so that remains a governed fact, not a hope.
+    """
+
+    hold_event_id: str = Field(default_factory=lambda: _new_id("hold"))
+    case_id: str
+    action: str = Field(description="placed | released")
+    officer_id: str = Field(min_length=1)
+    officer_role: str = Field(
+        description="Coded officer role: senior_analyst | l2_reviewer."
+    )
+    reason_code: str = Field(
+        description="Coded reason from the hold (or hold-release) vocabulary."
+    )
+    note: str = ""
+    recorded_at: datetime = Field(default_factory=_utcnow)
+    evidence_seq: int | None = Field(
+        default=None,
+        description="Seq of the legal_hold evidence item holding this event.",
+    )
+
+
+class ExportVerification(BaseModel):
+    """The offline verdict on one exported case-file package (R7).
+
+    Produced by re-checking the package end to end, with no store
+    and no network: every manifest item's content present and
+    hashing to its certified value, the chain recomputing link by
+    link to the manifest's head, and the seal hash reproducing
+    over the manifest. ``problems`` names every failure — an
+    altered item is named by its seq — and ``ok`` is true only
+    when there are none.
+    """
+
+    case_id: str = ""
+    seal_id: str = ""
+    ok: bool = False
+    items_checked: int = 0
+    problems: list[str] = Field(default_factory=list)

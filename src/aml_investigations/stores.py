@@ -21,14 +21,18 @@ from .models import (
     AccountProfile,
     AuditEvent,
     Case,
+    CaseSeal,
+    CaseUnseal,
     DispositionConfirmation,
     DispositionRecord,
     EvidenceItem,
     InvestigationRecord,
+    LegalHoldEvent,
     ListKind,
     ListSnapshot,
     NarrativeVerification,
     RulePack,
+    SarApproval,
     SarNarrative,
     ScreeningHit,
     ScreeningRun,
@@ -58,6 +62,10 @@ class InMemoryCaseStore:
         self._confirmations: list[DispositionConfirmation] = []
         self._narratives: list[SarNarrative] = []
         self._verifications: list[NarrativeVerification] = []
+        self._approvals: list[SarApproval] = []
+        self._seals: list[CaseSeal] = []
+        self._unseals: list[CaseUnseal] = []
+        self._hold_events: list[LegalHoldEvent] = []
         self._lock = threading.Lock()
 
     def ping(self) -> bool:
@@ -389,6 +397,79 @@ class InMemoryCaseStore:
             runs, key=lambda v: (v.verified_at, v.verification_id)
         )[-1]
         return latest.model_copy(deep=True)
+
+    # --- Approvals (R7): append-only dual-control decisions ---------
+    def add_approval(self, approval: SarApproval) -> SarApproval:
+        with self._lock:
+            self._approvals.append(approval.model_copy(deep=True))
+        return approval
+
+    def list_approvals(self, case_id: str) -> list[SarApproval]:
+        approvals = [a for a in self._approvals if a.case_id == case_id]
+        return [
+            a.model_copy(deep=True)
+            for a in sorted(approvals, key=lambda a: (a.decided_at, a.approval_id))
+        ]
+
+    def get_approval(self, approval_id: str) -> SarApproval | None:
+        for approval in self._approvals:
+            if approval.approval_id == approval_id:
+                return approval.model_copy(deep=True)
+        return None
+
+    def get_approval_for(self, narrative_id: str) -> SarApproval | None:
+        decisions = [
+            a for a in self._approvals if a.narrative_id == narrative_id
+        ]
+        if not decisions:
+            return None
+        latest = sorted(
+            decisions, key=lambda a: (a.decided_at, a.approval_id)
+        )[-1]
+        return latest.model_copy(deep=True)
+
+    # --- Seals, unseals, legal holds (R7): append-only custody -------
+    def add_seal(self, seal: CaseSeal) -> CaseSeal:
+        with self._lock:
+            self._seals.append(seal.model_copy(deep=True))
+        return seal
+
+    def list_seals(self, case_id: str) -> list[CaseSeal]:
+        seals = [s for s in self._seals if s.case_id == case_id]
+        return [
+            s.model_copy(deep=True)
+            for s in sorted(seals, key=lambda s: s.version)
+        ]
+
+    def get_seal(self, seal_id: str) -> CaseSeal | None:
+        for seal in self._seals:
+            if seal.seal_id == seal_id:
+                return seal.model_copy(deep=True)
+        return None
+
+    def add_unseal(self, unseal: CaseUnseal) -> CaseUnseal:
+        with self._lock:
+            self._unseals.append(unseal.model_copy(deep=True))
+        return unseal
+
+    def list_unseals(self, case_id: str) -> list[CaseUnseal]:
+        unseals = [u for u in self._unseals if u.case_id == case_id]
+        return [
+            u.model_copy(deep=True)
+            for u in sorted(unseals, key=lambda u: (u.unsealed_at, u.unseal_id))
+        ]
+
+    def add_hold_event(self, event: LegalHoldEvent) -> LegalHoldEvent:
+        with self._lock:
+            self._hold_events.append(event.model_copy(deep=True))
+        return event
+
+    def list_hold_events(self, case_id: str) -> list[LegalHoldEvent]:
+        events = [e for e in self._hold_events if e.case_id == case_id]
+        return [
+            e.model_copy(deep=True)
+            for e in sorted(events, key=lambda e: (e.recorded_at, e.hold_event_id))
+        ]
 
 
 class SqlCaseStore:
@@ -990,3 +1071,120 @@ class SqlCaseStore:
             if row
             else None
         )
+
+    # --- Approvals (R7): append-only dual-control decisions ---------
+    def add_approval(self, approval: SarApproval) -> SarApproval:
+        self._execute(
+            "INSERT INTO sar_approvals (approval_id, narrative_id,"
+            " case_id, decided_at, payload) VALUES (?, ?, ?, ?, ?)",
+            (
+                approval.approval_id,
+                approval.narrative_id,
+                approval.case_id,
+                approval.decided_at.isoformat(),
+                approval.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return approval
+
+    def list_approvals(self, case_id: str) -> list[SarApproval]:
+        rows = self._fetchall(
+            "SELECT payload FROM sar_approvals WHERE case_id = ?"
+            " ORDER BY decided_at ASC, approval_id ASC",
+            (case_id,),
+        )
+        return [SarApproval.model_validate_json(r["payload"]) for r in rows]
+
+    def get_approval(self, approval_id: str) -> SarApproval | None:
+        row = self._fetchone(
+            "SELECT payload FROM sar_approvals WHERE approval_id = ?",
+            (approval_id,),
+        )
+        return SarApproval.model_validate_json(row["payload"]) if row else None
+
+    def get_approval_for(self, narrative_id: str) -> SarApproval | None:
+        row = self._fetchone(
+            "SELECT payload FROM sar_approvals WHERE narrative_id = ?"
+            " ORDER BY decided_at DESC, approval_id DESC",
+            (narrative_id,),
+        )
+        return SarApproval.model_validate_json(row["payload"]) if row else None
+
+    # --- Seals, unseals, legal holds (R7): append-only custody -------
+    def add_seal(self, seal: CaseSeal) -> CaseSeal:
+        self._execute(
+            "INSERT INTO case_seals (seal_id, case_id, version,"
+            " sealed_at, payload) VALUES (?, ?, ?, ?, ?)",
+            (
+                seal.seal_id,
+                seal.case_id,
+                seal.version,
+                seal.sealed_at.isoformat(),
+                seal.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return seal
+
+    def list_seals(self, case_id: str) -> list[CaseSeal]:
+        rows = self._fetchall(
+            "SELECT payload FROM case_seals WHERE case_id = ?"
+            " ORDER BY version ASC",
+            (case_id,),
+        )
+        return [CaseSeal.model_validate_json(r["payload"]) for r in rows]
+
+    def get_seal(self, seal_id: str) -> CaseSeal | None:
+        row = self._fetchone(
+            "SELECT payload FROM case_seals WHERE seal_id = ?",
+            (seal_id,),
+        )
+        return CaseSeal.model_validate_json(row["payload"]) if row else None
+
+    def add_unseal(self, unseal: CaseUnseal) -> CaseUnseal:
+        self._execute(
+            "INSERT INTO case_unseals (unseal_id, case_id, seal_id,"
+            " unsealed_at, payload) VALUES (?, ?, ?, ?, ?)",
+            (
+                unseal.unseal_id,
+                unseal.case_id,
+                unseal.seal_id,
+                unseal.unsealed_at.isoformat(),
+                unseal.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return unseal
+
+    def list_unseals(self, case_id: str) -> list[CaseUnseal]:
+        rows = self._fetchall(
+            "SELECT payload FROM case_unseals WHERE case_id = ?"
+            " ORDER BY unsealed_at ASC, unseal_id ASC",
+            (case_id,),
+        )
+        return [CaseUnseal.model_validate_json(r["payload"]) for r in rows]
+
+    def add_hold_event(self, event: LegalHoldEvent) -> LegalHoldEvent:
+        self._execute(
+            "INSERT INTO legal_hold_events (hold_event_id, case_id,"
+            " recorded_at, payload) VALUES (?, ?, ?, ?)",
+            (
+                event.hold_event_id,
+                event.case_id,
+                event.recorded_at.isoformat(),
+                event.model_dump_json(),
+            ),
+        )
+        self._commit()
+        return event
+
+    def list_hold_events(self, case_id: str) -> list[LegalHoldEvent]:
+        rows = self._fetchall(
+            "SELECT payload FROM legal_hold_events WHERE case_id = ?"
+            " ORDER BY recorded_at ASC, hold_event_id ASC",
+            (case_id,),
+        )
+        return [
+            LegalHoldEvent.model_validate_json(r["payload"]) for r in rows
+        ]

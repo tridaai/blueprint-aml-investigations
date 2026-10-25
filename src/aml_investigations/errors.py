@@ -193,6 +193,72 @@ class NarrativeNotFoundError(SarNarrativeError):
     """The named SAR narrative does not exist (on the named case)."""
 
 
+class ApprovalError(AmlError):
+    """Base class for dual-control approval (R7) refusals."""
+
+
+class ApprovalRefusedError(ApprovalError):
+    """A SAR narrative approval or rejection was refused at the
+    second-person gate (Law 2's dual control).
+
+    Every refusal carries a named ``reason``:
+    anonymous_or_system_actor, unknown_role, case_not_sar_pending,
+    no_narrative, already_decided, narrative_not_verified,
+    approver_is_dispositioner, approver_is_drafter,
+    rejection_codes_required, unknown_rejection_code,
+    approval_reason_codes_not_applicable. The refusal is written to
+    the case's audit log before it is raised.
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(f"approval refused [{reason}]: {message}")
+
+
+class SealingError(AmlError):
+    """Base class for case sealing / legal hold / export (R7) refusals."""
+
+
+class SealingRefusedError(SealingError):
+    """A seal, unseal, legal-hold, or export action was refused.
+
+    Every refusal carries a named ``reason``:
+    anonymous_or_system_actor, officer_role_required,
+    already_sealed, case_not_sealed, case_not_terminal,
+    evidence_chain_broken, unknown_seal_purpose,
+    legal_hold_blocks_archive, unknown_unseal_reason,
+    unknown_hold_reason, already_on_hold, not_on_hold,
+    unknown_hold_release_reason. The refusal is written to the
+    case's audit log before it is raised.
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(f"sealing refused [{reason}]: {message}")
+
+
+class CaseSealedError(SealingRefusedError):
+    """A mutating service path was attempted on a sealed case.
+
+    A sealed case file is read-only (Law 5): the only writes it
+    accepts are the sealing service's own custody records (seal,
+    unseal, legal-hold events). Raised by every guarded service —
+    evidence intake, screening, typologies, investigation,
+    disposition, drafting — with this one named reason, so a sealed
+    case refuses identically at every door.
+    """
+
+    def __init__(self, case_id: str, seal_id: str) -> None:
+        self.case_id = case_id
+        self.seal_id = seal_id
+        super().__init__(
+            "case_sealed",
+            f"case {case_id} is sealed (seal {seal_id}); a sealed "
+            "case file is read-only — unseal it by a named officer "
+            "with a coded reason before any further work",
+        )
+
+
 class SanctionsHitBlocksCloseError(IllegalTransitionError):
     """A plain close was attempted on a case with an unresolved
     sanctions hit. The case is in a must-escalate posture: the lawful
