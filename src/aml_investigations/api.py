@@ -11,9 +11,12 @@ the analyst gate, confirm a pending one, read a case's disposition
 history, and read the confirmation / escalation work queues, and
 the SAR surface (R6): draft the narrative for a sar_pending case,
 fetch the current draft and its version history, re-run the
-citation verifier, and read the latest verification record. No
-endpoint files a SAR — none exists; the blueprint ends at a
-verified draft awaiting a second person's approval (R7).
+citation verifier, and read the latest verification record, the
+approval and custody surface (R7): the dual-control decision,
+sealing, legal hold and export, and the clock surface (R8): a
+case's regulatory clocks, the clock board, and the clock
+escalation queue. No endpoint files a SAR — none exists; the
+blueprint ends at an approved, sealed case file.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from __future__ import annotations
 import base64
 import binascii
 import uuid
+from datetime import date
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -221,6 +225,14 @@ class ExportVerifyRequest(BaseModel):
     """An exported case-file package to re-verify offline (R7)."""
 
     package: dict
+
+
+class ClockRefreshRequest(BaseModel):
+    """A clock tick for one case (R8). ``as_of`` is the date the
+    clocks are computed at; omitted means today. The computation
+    itself never reads a wall clock."""
+
+    as_of: date | None = None
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -834,6 +846,56 @@ def create_app(services: Services | None = None) -> FastAPI:
     async def verify_export(payload: ExportVerifyRequest):
         result = verify_export_package(payload.package)
         return {"verification": result.model_dump(mode="json")}
+
+    # --- Regulatory clocks (R8): Law 6, computed in code -----------
+    @app.get("/cases/{case_id}/clock")
+    async def get_case_clock(case_id: str, as_of: date | None = None):
+        """A case's clocks at ``as_of`` (today when omitted) — a
+        pure read: the derivation writes nothing."""
+        view = services.clocks.case_clocks(
+            case_id, as_of=as_of or date.today()
+        )
+        return view.model_dump(mode="json")
+
+    @app.post("/cases/{case_id}/clock/refresh", status_code=201)
+    async def refresh_case_clock(case_id: str, payload: ClockRefreshRequest):
+        """The scheduler tick for one case: record any clock
+        crossing the ``as_of`` reveals (idempotent — a crossing
+        already on the chain is never recorded twice)."""
+        as_of = payload.as_of or date.today()
+        events = services.clocks.refresh_escalations(case_id, as_of=as_of)
+        return {
+            "case_id": case_id,
+            "as_of": as_of.isoformat(),
+            "recorded": [e.model_dump(mode="json") for e in events],
+            "clocks": services.clocks.case_clocks(
+                case_id, as_of=as_of
+            ).model_dump(mode="json"),
+        }
+
+    @app.get("/clocks/board")
+    async def clock_board(as_of: date | None = None):
+        """Every case's clocks at ``as_of``, most urgent first.
+        Reading the board runs the tick first: any crossing it
+        reveals is recorded on the case's chain."""
+        as_of = as_of or date.today()
+        services.clocks.refresh_all_escalations(as_of=as_of)
+        return [
+            view.model_dump(mode="json")
+            for view in services.clocks.clock_board(as_of=as_of)
+        ]
+
+    @app.get("/queues/clock-escalations")
+    async def clock_escalation_queue(as_of: date | None = None):
+        """Clocks standing at due_soon / due / overdue at
+        ``as_of`` — overdue first, each entry naming its
+        deadline. Reading the queue runs the tick first."""
+        as_of = as_of or date.today()
+        services.clocks.refresh_all_escalations(as_of=as_of)
+        return [
+            entry.model_dump(mode="json")
+            for entry in services.clocks.escalation_queue(as_of=as_of)
+        ]
 
     @app.get("/queues/pending-confirmation")
     async def pending_confirmation_queue():

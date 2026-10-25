@@ -72,6 +72,23 @@ Usage:
     aml-agent verify-export <file>  re-verify an exported package
                                     end to end, offline; exit 1 when
                                     anything in it fails to verify
+    aml-agent clock <case_id> [--as-of YYYY-MM-DD]
+                                    a case's regulatory clocks (R8):
+                                    the SAR filing clock (30-day
+                                    initial / 60-day outer when no
+                                    subject is identified) and its
+                                    continuing-activity clock when
+                                    one was started — states derived
+                                    in code at the named date
+    aml-agent clock-board [--as-of YYYY-MM-DD]
+                                    every case's clocks, most urgent
+                                    first; reading the board records
+                                    any new due/overdue crossings on
+                                    the cases' chains first
+    aml-agent clock-escalations [--as-of YYYY-MM-DD]
+                                    the clock escalation queue:
+                                    overdue, then due, then due_soon,
+                                    each entry naming its deadline
 """
 
 from __future__ import annotations
@@ -190,6 +207,13 @@ def main(argv: list[str] | None = None) -> int:
     p_export.add_argument("--out", default=None)
     p_verify_export = sub.add_parser("verify-export")
     p_verify_export.add_argument("file")
+    p_clock = sub.add_parser("clock")
+    p_clock.add_argument("case_id")
+    p_clock.add_argument("--as-of", default=None)
+    p_clock_board = sub.add_parser("clock-board")
+    p_clock_board.add_argument("--as-of", default=None)
+    p_clock_esc = sub.add_parser("clock-escalations")
+    p_clock_esc.add_argument("--as-of", default=None)
     args = parser.parse_args(argv)
 
     services = build_services()
@@ -550,6 +574,46 @@ def main(argv: list[str] | None = None) -> int:
             result = verify_export_package(package)
             print(json.dumps(result.model_dump(mode="json"), indent=2))
             return 0 if result.ok else 1
+        elif args.command == "clock":
+            from datetime import date
+
+            as_of = (
+                date.fromisoformat(args.as_of)
+                if args.as_of
+                else date.today()
+            )
+            view = services.clocks.case_clocks(args.case_id, as_of=as_of)
+            print(json.dumps(view.model_dump(mode="json"), indent=2))
+        elif args.command == "clock-board":
+            from datetime import date
+
+            as_of = (
+                date.fromisoformat(args.as_of)
+                if args.as_of
+                else date.today()
+            )
+            services.clocks.refresh_all_escalations(as_of=as_of)
+            board = services.clocks.clock_board(as_of=as_of)
+            print(
+                json.dumps(
+                    [v.model_dump(mode="json") for v in board], indent=2
+                )
+            )
+        elif args.command == "clock-escalations":
+            from datetime import date
+
+            as_of = (
+                date.fromisoformat(args.as_of)
+                if args.as_of
+                else date.today()
+            )
+            services.clocks.refresh_all_escalations(as_of=as_of)
+            queue = services.clocks.escalation_queue(as_of=as_of)
+            print(
+                json.dumps(
+                    [e.model_dump(mode="json") for e in queue], indent=2
+                )
+            )
     except AmlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
