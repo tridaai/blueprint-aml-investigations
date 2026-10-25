@@ -6,8 +6,11 @@ disposition, the typology surface (R3): rule-pack registration,
 evidence-backed transaction ingestion, engine runs, findings, and
 the investigation surface (R4): run the investigation graph for a
 case, fetch the current investigation record and its version
-history. SAR drafting arrives in later rounds behind the same
-case/evidence model.
+history, and the disposition surface (R5): record a disposition at
+the analyst gate, confirm a pending one, read a case's disposition
+history, and read the confirmation / escalation work queues. SAR
+drafting arrives in later rounds behind the same case/evidence
+model.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from .errors import (
     AlertNotFoundError,
     AmlError,
     CaseNotFoundError,
+    DispositionRefusedError,
     DispositionRequiredError,
     EvidenceChainError,
     EvidenceNotFoundError,
@@ -49,7 +53,9 @@ from .logging_config import (
 )
 from .models import (
     CaseStatus,
+    ConfirmationOutcome,
     Disposition,
+    DispositionOutcome,
     HitStatus,
     ListKind,
     ListSnapshot,
@@ -121,6 +127,32 @@ class InvestigationRunRequest(BaseModel):
         "'offline' is the deterministic default; a live profile "
         "must be configured in the deployment.",
     )
+
+
+class DispositionRequest(BaseModel):
+    """One analyst disposition at the gate (R5). Field validation is
+    deliberately permissive here: the disposition service owns every
+    refusal and names its reason (anonymous actor, uncoded rationale,
+    stale record citation, sanctions block)."""
+
+    analyst_id: str
+    analyst_role: str
+    outcome: DispositionOutcome
+    rationale_codes: list[str] = Field(default_factory=list)
+    record_id: str
+    record_version: int
+    note: str = ""
+    review_period_days: int | None = None
+    missing_evidence: list[str] = Field(default_factory=list)
+
+
+class ConfirmationRequest(BaseModel):
+    """A second person's answer to a pending-confirmation disposition."""
+
+    confirmer_id: str
+    confirmer_role: str
+    outcome: ConfirmationOutcome
+    note: str = ""
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -217,6 +249,10 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     @app.exception_handler(InvestigationError)
     async def _investigation_error(_request: Request, exc: InvestigationError):
+        return _error(422, str(exc))
+
+    @app.exception_handler(DispositionRefusedError)
+    async def _disposition_refused(_request: Request, exc: DispositionRefusedError):
         return _error(422, str(exc))
 
     @app.get("/health")
@@ -479,6 +515,66 @@ def create_app(services: Services | None = None) -> FastAPI:
                 for r in services.investigations.record_history(case_id)
             ],
         }
+
+    # --- dispositions (R5): the analyst gate -------------------------
+    @app.post("/cases/{case_id}/disposition", status_code=201)
+    async def record_disposition(case_id: str, payload: DispositionRequest):
+        case_id_var.set(case_id)
+        record = services.dispositions.record_disposition(
+            case_id,
+            analyst_id=payload.analyst_id,
+            analyst_role=payload.analyst_role,
+            outcome=payload.outcome,
+            rationale_codes=payload.rationale_codes,
+            record_id=payload.record_id,
+            record_version=payload.record_version,
+            note=payload.note,
+            review_period_days=payload.review_period_days,
+            missing_evidence=payload.missing_evidence,
+        )
+        return {
+            "disposition": services.dispositions.view(record),
+            "case_status": services.store.get_case(case_id).status.value,
+        }
+
+    @app.post("/cases/{case_id}/disposition/confirmation", status_code=201)
+    async def confirm_disposition(case_id: str, payload: ConfirmationRequest):
+        case_id_var.set(case_id)
+        confirmation = services.dispositions.confirm_disposition(
+            case_id,
+            confirmer_id=payload.confirmer_id,
+            confirmer_role=payload.confirmer_role,
+            outcome=payload.outcome,
+            note=payload.note,
+        )
+        return {
+            "confirmation": confirmation.model_dump(mode="json"),
+            "case_status": services.store.get_case(case_id).status.value,
+        }
+
+    @app.get("/cases/{case_id}/dispositions")
+    async def get_dispositions(case_id: str):
+        if services.store.get_case(case_id) is None:
+            raise CaseNotFoundError(case_id)
+        return {
+            "case_id": case_id,
+            "dispositions": [
+                services.dispositions.view(r)
+                for r in services.dispositions.history(case_id)
+            ],
+            "confirmations": [
+                c.model_dump(mode="json")
+                for c in services.dispositions.confirmations(case_id)
+            ],
+        }
+
+    @app.get("/queues/pending-confirmation")
+    async def pending_confirmation_queue():
+        return services.dispositions.confirmation_queue()
+
+    @app.get("/queues/escalations")
+    async def escalation_queue():
+        return services.dispositions.escalation_queue()
 
     return app
 

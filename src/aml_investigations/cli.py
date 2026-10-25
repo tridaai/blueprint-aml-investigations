@@ -22,6 +22,20 @@ Usage:
                                     record the investigation record
     aml-agent investigation <case_id>
                                     show the current record + history
+    aml-agent disposition <case_id> --analyst ID --role ROLE
+              --outcome OUTCOME --code CODE [--code CODE ...]
+              --record-id ID --record-version N [--note TEXT]
+              [--review-days N] [--missing TYPE ...]
+                                    record an analyst disposition at
+                                    the gate (R5)
+    aml-agent confirm <case_id> --confirmer ID --role ROLE
+              --outcome confirmed|declined [--note TEXT]
+                                    a second person answers a pending
+                                    disposition (dual control)
+    aml-agent dispositions <case_id>
+                                    show the disposition history
+    aml-agent queue confirmations|escalations
+                                    the L2 / escalation work queues
 """
 
 from __future__ import annotations
@@ -70,6 +84,29 @@ def main(argv: list[str] | None = None) -> int:
     p_investigate.add_argument("--actor", default="investigation-service")
     p_investigation = sub.add_parser("investigation")
     p_investigation.add_argument("case_id")
+    p_disposition = sub.add_parser("disposition")
+    p_disposition.add_argument("case_id")
+    p_disposition.add_argument("--analyst", required=True)
+    p_disposition.add_argument("--role", required=True)
+    p_disposition.add_argument("--outcome", required=True)
+    p_disposition.add_argument("--code", action="append", default=[])
+    p_disposition.add_argument("--record-id", required=True)
+    p_disposition.add_argument("--record-version", type=int, required=True)
+    p_disposition.add_argument("--note", default="")
+    p_disposition.add_argument("--review-days", type=int, default=None)
+    p_disposition.add_argument("--missing", action="append", default=[])
+    p_confirm = sub.add_parser("confirm")
+    p_confirm.add_argument("case_id")
+    p_confirm.add_argument("--confirmer", required=True)
+    p_confirm.add_argument("--role", required=True)
+    p_confirm.add_argument(
+        "--outcome", choices=["confirmed", "declined"], required=True
+    )
+    p_confirm.add_argument("--note", default="")
+    p_dispositions = sub.add_parser("dispositions")
+    p_dispositions.add_argument("case_id")
+    p_queue = sub.add_parser("queue")
+    p_queue.add_argument("kind", choices=["confirmations", "escalations"])
     args = parser.parse_args(argv)
 
     services = build_services()
@@ -214,6 +251,81 @@ def main(argv: list[str] | None = None) -> int:
                     indent=2,
                 )
             )
+        elif args.command == "disposition":
+            from .models import DispositionOutcome
+
+            record = services.dispositions.record_disposition(
+                args.case_id,
+                analyst_id=args.analyst,
+                analyst_role=args.role,
+                outcome=DispositionOutcome(args.outcome),
+                rationale_codes=args.code,
+                record_id=args.record_id,
+                record_version=args.record_version,
+                note=args.note,
+                review_period_days=args.review_days,
+                missing_evidence=args.missing,
+            )
+            print(
+                json.dumps(
+                    {
+                        "disposition": services.dispositions.view(record),
+                        "case_status": services.store.get_case(
+                            args.case_id
+                        ).status.value,
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "confirm":
+            from .models import ConfirmationOutcome
+
+            confirmation = services.dispositions.confirm_disposition(
+                args.case_id,
+                confirmer_id=args.confirmer,
+                confirmer_role=args.role,
+                outcome=ConfirmationOutcome(args.outcome),
+                note=args.note,
+            )
+            print(
+                json.dumps(
+                    {
+                        "confirmation": confirmation.model_dump(mode="json"),
+                        "case_status": services.store.get_case(
+                            args.case_id
+                        ).status.value,
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "dispositions":
+            if services.store.get_case(args.case_id) is None:
+                print(f"case not found: {args.case_id}", file=sys.stderr)
+                return 1
+            print(
+                json.dumps(
+                    {
+                        "case_id": args.case_id,
+                        "dispositions": [
+                            services.dispositions.view(r)
+                            for r in services.dispositions.history(args.case_id)
+                        ],
+                        "confirmations": [
+                            c.model_dump(mode="json")
+                            for c in services.dispositions.confirmations(
+                                args.case_id
+                            )
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "queue":
+            if args.kind == "confirmations":
+                entries = services.dispositions.confirmation_queue()
+            else:
+                entries = services.dispositions.escalation_queue()
+            print(json.dumps(entries, indent=2))
     except AmlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
