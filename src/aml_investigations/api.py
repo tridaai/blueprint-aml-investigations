@@ -6,11 +6,14 @@ disposition, the typology surface (R3): rule-pack registration,
 evidence-backed transaction ingestion, engine runs, findings, and
 the investigation surface (R4): run the investigation graph for a
 case, fetch the current investigation record and its version
-history, and the disposition surface (R5): record a disposition at
+history, the disposition surface (R5): record a disposition at
 the analyst gate, confirm a pending one, read a case's disposition
-history, and read the confirmation / escalation work queues. SAR
-drafting arrives in later rounds behind the same case/evidence
-model.
+history, and read the confirmation / escalation work queues, and
+the SAR surface (R6): draft the narrative for a sar_pending case,
+fetch the current draft and its version history, re-run the
+citation verifier, and read the latest verification record. No
+endpoint files a SAR — none exists; the blueprint ends at a
+verified draft awaiting a second person's approval (R7).
 """
 
 from __future__ import annotations
@@ -35,9 +38,11 @@ from .errors import (
     IllegalTransitionError,
     InvestigationError,
     InvestigationStateError,
+    NarrativeNotFoundError,
     NoTransactionsError,
     RulePackImmutableError,
     RulePackNotFoundError,
+    SarNarrativeRefusedError,
     ScreeningError,
     ScreeningPinRequiredError,
     SnapshotImmutableError,
@@ -155,6 +160,20 @@ class ConfirmationRequest(BaseModel):
     note: str = ""
 
 
+class SarDraftRequest(BaseModel):
+    """A SAR narrative drafting run (R6). Drafting is the agent's
+    work — the actor names the service or analyst running it; the
+    profile names the composer behind the model port."""
+
+    actor: str = Field(default="sar-drafting-service", min_length=1)
+    profile: str = Field(
+        default="offline",
+        description="Composer profile. 'offline' is the deterministic "
+        "default; a live profile must be configured in the deployment "
+        "and refuses loudly until it is.",
+    )
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"detail": message})
 
@@ -254,6 +273,14 @@ def create_app(services: Services | None = None) -> FastAPI:
     @app.exception_handler(DispositionRefusedError)
     async def _disposition_refused(_request: Request, exc: DispositionRefusedError):
         return _error(422, str(exc))
+
+    @app.exception_handler(SarNarrativeRefusedError)
+    async def _sar_refused(_request: Request, exc: SarNarrativeRefusedError):
+        return _error(422, str(exc))
+
+    @app.exception_handler(NarrativeNotFoundError)
+    async def _narrative_not_found(_request: Request, exc: NarrativeNotFoundError):
+        return _error(404, str(exc))
 
     @app.get("/health")
     async def health():
@@ -566,6 +593,68 @@ def create_app(services: Services | None = None) -> FastAPI:
                 c.model_dump(mode="json")
                 for c in services.dispositions.confirmations(case_id)
             ],
+        }
+
+    # --- SAR narratives (R6): drafting + the citation verifier ----
+    @app.post("/cases/{case_id}/sar/draft", status_code=201)
+    async def draft_sar(case_id: str, payload: SarDraftRequest):
+        case_id_var.set(case_id)
+        narrative, verification = services.sar.draft_narrative(
+            case_id, actor=payload.actor, profile=payload.profile
+        )
+        return {
+            "narrative": services.sar.view(narrative),
+            "verification": verification.model_dump(mode="json"),
+            "case_status": services.store.get_case(case_id).status.value,
+        }
+
+    @app.get("/cases/{case_id}/sar")
+    async def get_sar(case_id: str):
+        if services.store.get_case(case_id) is None:
+            raise CaseNotFoundError(case_id)
+        current = services.sar.current_narrative(case_id)
+        return {
+            "case_id": case_id,
+            "current": (
+                services.sar.view(current) if current is not None else None
+            ),
+            "history": [
+                services.sar.view(n)
+                for n in services.sar.narrative_history(case_id)
+            ],
+        }
+
+    @app.post("/cases/{case_id}/sar/verify", status_code=201)
+    async def verify_sar(case_id: str):
+        case_id_var.set(case_id)
+        verification = services.sar.verify_narrative(case_id)
+        current = services.sar.current_narrative(case_id)
+        return {
+            "verification": verification.model_dump(mode="json"),
+            "narrative_status": (
+                services.sar.status_of(current) if current is not None else None
+            ),
+        }
+
+    @app.get("/cases/{case_id}/sar/verification")
+    async def get_sar_verification(case_id: str):
+        if services.store.get_case(case_id) is None:
+            raise CaseNotFoundError(case_id)
+        current = services.sar.current_narrative(case_id)
+        if current is None:
+            raise NarrativeNotFoundError(
+                f"case {case_id} holds no SAR narrative"
+            )
+        verification = services.sar.latest_verification(current.narrative_id)
+        return {
+            "case_id": case_id,
+            "narrative_id": current.narrative_id,
+            "narrative_status": services.sar.status_of(current),
+            "verification": (
+                verification.model_dump(mode="json")
+                if verification is not None
+                else None
+            ),
         }
 
     @app.get("/queues/pending-confirmation")

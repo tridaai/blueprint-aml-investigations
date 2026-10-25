@@ -13,6 +13,7 @@ from aml_investigations.intake import IntakeService, ListAlertFeed
 from aml_investigations.investigation import InvestigationService
 from aml_investigations.models import Alert
 from aml_investigations.object_store import LocalObjectStore
+from aml_investigations.sar import SarNarrativeService
 from aml_investigations.screening import ListScreeningFeed, ScreeningService
 from aml_investigations.stores import InMemoryCaseStore
 from aml_investigations.transactions import ListRulePackFeed, ListTransactionFeed
@@ -57,6 +58,7 @@ def services(tmp_path: Path) -> Services:
         store, store, store, store, evidence, disposition_store=store
     )
     dispositions = DispositionService(store, store, store, store, evidence, workflow)
+    sar = SarNarrativeService(store, store, store, store, evidence)
     settings = Settings(
         database_url=None,
         sqlite_path=tmp_path / "aml.db",
@@ -85,4 +87,5 @@ def services(tmp_path: Path) -> Services:
         rule_pack_feed=ListRulePackFeed([]),
         investigations=investigations,
         dispositions=dispositions,
+        sar=sar,
     )

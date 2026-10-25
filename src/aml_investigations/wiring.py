@@ -26,6 +26,7 @@ from .ports import (
     ScreeningListSource,
     TransactionSource,
 )
+from .sar import SarNarrativeService
 from .screening import ReferenceScreeningFeed, ScreeningService
 from .stores import SqlCaseStore
 from .transactions import ReferenceRulePackFeed, ReferenceTransactionFeed
@@ -49,6 +50,7 @@ class Services:
     rule_pack_feed: RulePackSource
     investigations: InvestigationService
     dispositions: DispositionService
+    sar: SarNarrativeService
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -80,6 +82,7 @@ def build_services(settings: Settings | None = None) -> Services:
     dispositions = DispositionService(
         store, store, store, store, evidence, workflow
     )
+    sar = SarNarrativeService(store, store, store, store, evidence)
     return Services(
         settings=settings,
         store=store,
@@ -95,4 +98,5 @@ def build_services(settings: Settings | None = None) -> Services:
         rule_pack_feed=rule_pack_feed,
         investigations=investigations,
         dispositions=dispositions,
+        sar=sar,
     )

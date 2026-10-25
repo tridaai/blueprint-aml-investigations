@@ -36,6 +36,15 @@ Usage:
                                     show the disposition history
     aml-agent queue confirmations|escalations
                                     the L2 / escalation work queues
+    aml-agent draft-sar <case_id> [--profile P] [--actor A]
+                                    draft the SAR narrative for a
+                                    sar_pending case and run the
+                                    citation verifier over it (R6)
+    aml-agent sar <case_id>         show the current SAR narrative
+                                    draft + its version history
+    aml-agent verify-sar <case_id>  re-run the citation verifier
+                                    over the current draft and show
+                                    the verification record
 """
 
 from __future__ import annotations
@@ -107,6 +116,14 @@ def main(argv: list[str] | None = None) -> int:
     p_dispositions.add_argument("case_id")
     p_queue = sub.add_parser("queue")
     p_queue.add_argument("kind", choices=["confirmations", "escalations"])
+    p_draft_sar = sub.add_parser("draft-sar")
+    p_draft_sar.add_argument("case_id")
+    p_draft_sar.add_argument("--profile", default="offline")
+    p_draft_sar.add_argument("--actor", default="sar-drafting-service")
+    p_sar = sub.add_parser("sar")
+    p_sar.add_argument("case_id")
+    p_verify_sar = sub.add_parser("verify-sar")
+    p_verify_sar.add_argument("case_id")
     args = parser.parse_args(argv)
 
     services = build_services()
@@ -326,6 +343,46 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 entries = services.dispositions.escalation_queue()
             print(json.dumps(entries, indent=2))
+        elif args.command == "draft-sar":
+            narrative, verification = services.sar.draft_narrative(
+                args.case_id, actor=args.actor, profile=args.profile
+            )
+            print(
+                json.dumps(
+                    {
+                        "narrative": services.sar.view(narrative),
+                        "verification": verification.model_dump(mode="json"),
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "sar":
+            if services.store.get_case(args.case_id) is None:
+                print(f"case not found: {args.case_id}", file=sys.stderr)
+                return 1
+            current = services.sar.current_narrative(args.case_id)
+            print(
+                json.dumps(
+                    {
+                        "case_id": args.case_id,
+                        "current": (
+                            services.sar.view(current)
+                            if current is not None
+                            else None
+                        ),
+                        "history": [
+                            services.sar.view(n)
+                            for n in services.sar.narrative_history(
+                                args.case_id
+                            )
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "verify-sar":
+            verification = services.sar.verify_narrative(args.case_id)
+            print(json.dumps(verification.model_dump(mode="json"), indent=2))
     except AmlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
