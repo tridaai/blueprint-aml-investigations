@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R7 of 20)
+## What is built at this round (R8 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -193,10 +193,34 @@ docker compose up --build
   is no purge path anywhere in the system for it — or anything —
   to unblock. Approval and sealing end at an approved, sealed case
   file: **no SAR is ever filed by this system**.
+- **Regulatory clocks + escalation (R8)** — Law 6 runs in code,
+  not in someone's calendar. Every case carries a filing clock
+  computed from its initial-detection date: the SAR deadline is
+  detection + 30 days, and where the record identifies no
+  subject, the 60-day outer limit governs instead — whether a
+  subject is identified is derived from the record (the alert
+  payload's subject facts, or a corroborated screening hit),
+  never asserted by an analyst. Clock states are derived at the
+  date you ask about — on track, due soon, due, overdue — and a
+  clock ends satisfied at `filed_sar`, or closed-no-file when
+  the analyst gate's standing disposition documents the
+  decision: the clock names that disposition, whose coded
+  rationale is the no-file documentation. A terminal case with
+  no disposition anywhere is reported as a clock violation, not
+  passed over. When a new alert opens for a customer with a
+  prior filed case, intake starts a continuing-activity clock
+  on the new case (review due at the prior determination + 90
+  days, filing due at + 120). Escalation is a case event: the
+  first time a clock is found due or overdue for a deadline,
+  the crossing is recorded on the case's evidence chain —
+  idempotently, so re-computation never duplicates it — and
+  the escalation queue and clock board read the same
+  derivation, most urgent first, each entry naming its
+  deadline.
 
-The rest of the investigation — regulatory clocks,
-continuing-activity reviews, injection defences — lands in rounds
-R8–R10 per the round map in `docs/architecture.md`.
+The rest of the investigation — continuing-activity reviews,
+injection defences, the analyst console — lands in rounds
+R9–R14 per the round map in `docs/architecture.md`.
 
 ## Configuration
 
@@ -216,7 +240,7 @@ R8–R10 per the round map in `docs/architecture.md`.
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, API, SQL store
+make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 
@@ -239,8 +263,13 @@ superseded-record citations accepted (0), disposition positive
 paths failed (0), SAR self-approvals accepted (0),
 dispositioner-approvals accepted (0), unverified or stale
 narrative approvals accepted (0), mutations of a sealed case
-accepted (0), tampered exports passing verification (0), and
-seals with an incomplete manifest accepted (0).
+accepted (0), tampered exports passing verification (0),
+seals with an incomplete manifest accepted (0), wrong clock
+deadlines computed (0), wrong clock boundary states (0),
+overdue clocks missing from the escalation queue (0), ended
+clocks still escalated (0), duplicate escalation events
+recorded (0), and terminal cases without a disposition going
+undetected by the clock (0).
 
 ## Honest status
 
@@ -253,9 +282,12 @@ seals with an incomplete manifest accepted (0).
   defined behind the model port and not yet exercised — it refuses
   loudly until a key is wired.
 - No SAR is ever actually filed — the blueprint ends at an approved,
-  sealed case file. As of R7 the line stops exactly there: a
+  sealed case file. As of R8 the line stops exactly there: a
   narrative approved under dual control, its case file sealed and
-  exportable, the export verifiable offline.
+  exportable, the export verifiable offline — and every case
+  carrying a regulatory clock that says, in code, whether the
+  file is on time, due, overdue, satisfied, or documented as a
+  no-file decision.
 - The Docker image builds in CI-grade environments; the compose
   stack is the supported local full-stack path.
 

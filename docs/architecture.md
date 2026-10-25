@@ -503,6 +503,72 @@ decided and then put under custody:
   the API (`POST /cases/export/verify`) and the CLI
   (`verify-export`, exit 1 on any failure).
 
+## Regulatory clocks + escalation (R8) — Law 6
+
+Every round before this one stamped dates; this round is where
+the dates become deadlines, computed in code (`clocks.py`) — the
+system's only clocks, with nobody's calendar consulted:
+
+- **The filing clock.** Every case carries one from the day it
+  opens, as pure date arithmetic over the initial-detection date
+  stamped at intake: the SAR initial deadline is detection + 30
+  calendar days; where the record identifies no subject, the
+  outer limit — detection + 60 — is the operative deadline
+  instead. Subject identification is itself derived from the
+  record (the alert payload's name plus a date of birth or a
+  recorded identifier, or a corroborated screening hit — strong
+  or confirmed): a bare name does not identify anyone, and the
+  move to the outer deadline is a coded state of the clock,
+  never an analyst's assertion. Both deadlines are always
+  carried on the clock view; the operative one is named.
+- **States are derived, never stored.** Against an `as_of` the
+  caller names (the computation reads no wall clock, so a board
+  rendered for a date is reproducible for that date), a live
+  clock stands `on_track`, `due_soon` (within seven days),
+  `due`, or `overdue`. It ends `satisfied` when the case reaches
+  `filed_sar`, or `closed_no_file` when a standing closing
+  disposition at the gate documents the no-file decision — and
+  the clock names that disposition: its coded rationale *is*
+  the no-file documentation Law 6 requires. A pending-
+  confirmation closure has not taken effect and does not end
+  the clock; a case reopened after a monitoring closure is
+  live again. A terminal case with no disposition anywhere on
+  its record is reported as a clock **violation**
+  (`terminal_without_disposition`): the gates make it
+  unreachable, so its appearance means the record itself is
+  wrong, and the clock says so rather than hiding it.
+- **The continuing-activity clock.** When intake opens a case
+  for a customer with a prior `filed_sar` case, it records a
+  `continuing_activity_link` evidence item on the new case —
+  naming the prior case and the filing determination date (the
+  prior case's approval date, or its closing disposition's) —
+  and a second clock starts: review due at determination + 90
+  days, filing due at + 120, per FinCEN's continuing-activity
+  guidance. Until the review date the review is the operative
+  deadline; past it, the filing deadline governs and the clock
+  carries `review_overdue`. The review workflow that answers
+  this clock is R9; R8 starts it and escalates it.
+- **Escalation is a case event.** The first time a refresh
+  finds a clock at `due` or `overdue` for a deadline, the
+  crossing is written onto the case's evidence chain
+  (`clock_escalation`, with the deadline and the state it was
+  found in) — idempotently, by reading the recorded events
+  back before writing: re-computation never duplicates a
+  crossing, and reaching `overdue` after `due` on the same
+  deadline is a second, distinct crossing. The refresh is the
+  in-app scheduler tick (`refresh_all_escalations`); reading
+  the clock board or the escalation queue over the API or CLI
+  runs it first. The **escalation queue** is the same
+  derivation read as a worklist — overdue, then due, then
+  due_soon, each entry naming its deadline and the time to it;
+  satisfied and closed clocks never appear. The **clock
+  board** is every case's clocks at an `as_of`, most urgent
+  first — R17 builds the reporting surface on it.
+- **No clock table exists.** Clocks are derived views over
+  stored facts (the case record, the disposition history, the
+  evidence chain), so there is no migration for this round and
+  no stored state a hand could edit into compliance.
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
@@ -524,8 +590,11 @@ verifier runs); migration 0007 added `sar_approvals`, `case_seals`,
 `case_unseals`, and `legal_hold_events` (the approval gate's
 decisions and the custody layer's records — all append-only, with
 sealed state derived from the seal/unseal history, never stored).
-Later rounds add: LangGraph checkpointing on Postgres, pgvector for
-adverse-media similarity (R12), and the clock/scheduler tables (R8).
+R8's regulatory clocks added no tables at all — clocks are derived
+views over the case, disposition, and evidence records (see the
+clocks section above), and their escalation events ride the
+evidence chain. Later rounds add: LangGraph checkpointing on
+Postgres, and pgvector for adverse-media similarity (R12).
 
 ## Ports
 
@@ -576,7 +645,14 @@ everything, untrusted input quarantined (Law 7).
    hold recorded on the chain and stated on the seal, export
    verifiable offline — and no purge path anywhere.
 6. Regulatory clocks are code (SAR 30/60-day, continuing-activity
-   90/120-day) — detection date stamped at intake (R1) ✓, clocks R8/R9.
+   90/120-day) — detection date stamped at intake (R1) ✓; the
+   clocks themselves (R8) ✓: deadlines as pure date arithmetic,
+   the no-subject outer limit as a coded state, derived states,
+   no-file endings naming the documenting disposition,
+   terminal-without-disposition reported as a violation,
+   continuing-activity clocks started at intake, escalation
+   crossings recorded on the chain idempotently, board + queue.
+   The review workflow over the continuing clock is R9.
 7. Prompt injection inside evidence is a case event, quarantined — R10.
 8. Rubber-stamping is measured (draft-vs-final diff) — R5/R17.
 
