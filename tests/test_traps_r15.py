@@ -1009,7 +1009,7 @@ def test_continuing_clock_anchors_on_the_late_determination(services):
         disposition=Disposition(
             analyst=ANALYST,
             decision="escalate_sar",
-            reason_code="STRUCTURING_PATTERN",
+            reason_code="STRUCTURING_SUSPECTED",
             decided_at=datetime(2026, 3, 17, 9, 0, tzinfo=timezone.utc),
         ),
     )
@@ -1019,7 +1019,7 @@ def test_continuing_clock_anchors_on_the_late_determination(services):
             analyst_id=ANALYST,
             analyst_role="analyst",
             outcome=DispositionOutcome.ESCALATE_SAR,
-            rationale_codes=["STRUCTURING_PATTERN"],
+            rationale_codes=["STRUCTURING_SUSPECTED"],
             rationale_vocabulary_version="2026.10.1",
             record_id=f"INV-{prior.case_id}-V1",
             record_version=1,
