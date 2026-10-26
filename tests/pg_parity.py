@@ -23,10 +23,11 @@ collection (every test module already imported):
   same schema, so the reopen/persistence tests verify the same
   property against Postgres that they verify against a file.
 
-Two tests reach into the in-memory double's internals on purpose —
-they simulate an attacker with direct database access rewriting or
-deleting an evidence row (tests/test_evidence_chain.py,
-tests/test_traps_r15.py). ``PgParityStore`` therefore exposes an
+Some tests reach into the in-memory double's internals on purpose —
+they simulate an attacker with direct database access rewriting,
+deleting, or appending an evidence row (tests/test_evidence_chain.py,
+tests/test_traps_r15.py, tests/test_redteam_r19.py).
+``PgParityStore`` therefore exposes an
 ``_evidence`` view with exactly the list operations those tests
 perform, implemented as UPDATE/DELETE statements against the
 ``evidence_items`` table in the store's schema: the same tampering,
@@ -97,7 +98,8 @@ class _EvidenceView:
 
     Supports exactly what the tampering tests do with the
     in-memory double's list: read an item by position, replace the
-    item at a position, delete the item at a position — as SQL
+    item at a position, delete the item at a position, append an
+    item, and pop the tail item (the R19 chain attacks) — as SQL
     against the store's own table, committed immediately (the
     tampering is meant to be durable, like a real DB write).
     """
@@ -140,6 +142,27 @@ class _EvidenceView:
             (self._case_id, current.seq),
         )
         self._store._commit()
+
+    def append(self, item) -> None:
+        self._store._execute(
+            "INSERT INTO evidence_items"
+            " (case_id, seq, kind, chain_hash, payload)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                self._case_id,
+                item.seq,
+                item.kind,
+                item.chain_hash,
+                item.model_dump_json(),
+            ),
+        )
+        self._store._commit()
+
+    def pop(self, index: int = -1):
+        items = self._items()
+        item = items[index]
+        del self[index]
+        return item
 
 
 class _EvidenceByCase:
