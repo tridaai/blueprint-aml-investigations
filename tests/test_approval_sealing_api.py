@@ -20,7 +20,7 @@ OFFICER = {"officer_id": "o.reyes", "officer_role": "l2_reviewer"}
 
 @pytest.fixture()
 def client(services) -> TestClient:  # noqa: F811
-    return TestClient(create_app(services))
+    return TestClient(create_app(services), headers={"x-caller-id": "t.officer", "x-caller-role": "bsa_officer"})
 
 
 def _drafted_case(client: TestClient) -> str:

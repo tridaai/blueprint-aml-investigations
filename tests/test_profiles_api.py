@@ -19,7 +19,7 @@ from aml_investigations.transactions import ListTransactionFeed
 
 
 def _client(services) -> TestClient:
-    return TestClient(create_app(services))
+    return TestClient(create_app(services), headers={"x-caller-id": "t.officer", "x-caller-role": "bsa_officer"})
 
 
 def _seed(services):

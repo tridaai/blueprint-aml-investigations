@@ -11,7 +11,7 @@ from tests.test_screening import adverse_v1, pep_v1, sanctions_v1, sanctions_v2
 
 @pytest.fixture()
 def client(services) -> TestClient:
-    return TestClient(create_app(services))
+    return TestClient(create_app(services), headers={"x-caller-id": "t.officer", "x-caller-role": "bsa_officer"})
 
 
 def _ingest(client: TestClient, snapshot) -> dict:

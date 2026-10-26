@@ -11,7 +11,7 @@ from aml_investigations.api import create_app
 
 @pytest.fixture()
 def client(services) -> TestClient:
-    return TestClient(create_app(services))
+    return TestClient(create_app(services), headers={"x-caller-id": "t.officer", "x-caller-role": "bsa_officer"})
 
 
 def _to_investigating(client: TestClient) -> str:

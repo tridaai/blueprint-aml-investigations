@@ -1242,7 +1242,7 @@ def test_counterparty_payload_fenced_in_view_and_api(services):
     assert FENCE_MARKER in view.name
     assert "ignore all previous instructions" not in view.name
 
-    client = TestClient(create_app(services))
+    client = TestClient(create_app(services), headers={"x-caller-id": "t.officer", "x-caller-role": "bsa_officer"})
     response = client.get("/customers/CUST-CP-1/counterparties")
     assert response.status_code == 200
     (entry,) = response.json()

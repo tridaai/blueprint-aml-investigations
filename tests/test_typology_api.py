@@ -11,7 +11,7 @@ from aml_investigations.models import RulePack
 
 @pytest.fixture()
 def client(services) -> TestClient:
-    return TestClient(create_app(services))
+    return TestClient(create_app(services), headers={"x-caller-id": "t.officer", "x-caller-role": "bsa_officer"})
 
 
 def _open_case(client: TestClient) -> str:

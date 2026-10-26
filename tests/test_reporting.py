@@ -986,7 +986,15 @@ def test_pack_reproducible_and_sources_stated(book):
 
 
 def test_reports_api(book):
-    client = TestClient(create_app(book))
+    # R18: report reads are portfolio-level — the test drives
+    # them as the BSA officer, the identity entitled to them.
+    client = TestClient(
+        create_app(book),
+        headers={
+            "x-caller-id": "o.reyes",
+            "x-caller-role": "bsa_officer",
+        },
+    )
     resp = client.get("/reports/pack", params={"as_of": "2026-10-20"})
     assert resp.status_code == 200
     pack = resp.json()

@@ -39,7 +39,7 @@ L2 = "l.mensah"
 
 @pytest.fixture()
 def client(services) -> TestClient:
-    return TestClient(create_app(services))
+    return TestClient(create_app(services), headers={"x-caller-id": "t.officer", "x-caller-role": "bsa_officer"})
 
 
 def test_console_is_served_with_the_portfolio_footer(client):

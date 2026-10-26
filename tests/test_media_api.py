@@ -22,7 +22,7 @@ def _client(services) -> TestClient:
         profile_service=services.profiles,
         typology_store=services.store,
     )
-    return TestClient(create_app(services))
+    return TestClient(create_app(services), headers={"x-caller-id": "t.officer", "x-caller-role": "bsa_officer"})
 
 
 def _seed(services) -> str:

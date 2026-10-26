@@ -23,6 +23,7 @@ def pytest_collection_modifyitems(session, config, items):
 def pytest_sessionfinish(session, exitstatus):
     pg_parity.cleanup()
 
+from aml_investigations.access import AccessService
 from aml_investigations.approval import SarApprovalService
 from aml_investigations.clocks import RegulatoryClockService
 from aml_investigations.config import Settings
@@ -219,4 +220,5 @@ def services(tmp_path: Path) -> Services:
             ledger_store=store,
             quarantine=quarantine,
         ),
+        access=AccessService(store, evidence=evidence, seal_store=store),
     )
