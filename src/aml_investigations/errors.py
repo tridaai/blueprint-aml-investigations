@@ -106,6 +106,16 @@ class TransactionMismatchError(TypologyError):
     account, or mixed accounts inside one batch."""
 
 
+class TransactionConflictError(TypologyError):
+    """A delivered batch re-uses a transaction id the case already
+    holds with different content, outside an identical whole-batch
+    re-delivery. A transaction id names one record forever:
+    corrections arrive as new transactions with new ids, and a
+    feed contradicting itself about an id it already delivered is
+    refused before anything is written — never merged, never
+    half-ingested, and never silently honoured on a retry."""
+
+
 class InvestigationError(AmlError):
     """Base class for investigation-graph (R4) refusals."""
 

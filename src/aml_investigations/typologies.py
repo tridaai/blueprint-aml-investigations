@@ -32,6 +32,7 @@ from .errors import (
     NoTransactionsError,
     RulePackImmutableError,
     RulePackNotFoundError,
+    TransactionConflictError,
     TransactionMismatchError,
     TypologyError,
 )
@@ -625,6 +626,19 @@ class TypologyService:
         an idempotent no-op returning the existing batch. A batch
         naming an account other than the case's — or mixing accounts
         — is refused: a case's stream is one account's stream.
+
+        Transaction identity is by id, and an id names one record
+        forever (Law 5 applied to the stream). A later batch may
+        re-deliver records the case already holds — the
+        full-history feed does exactly that as it grows — and
+        byte-identical records are stored once, not duplicated.
+        But a batch that re-uses a stored id with *different*
+        content contradicts the evidence already on the file: it
+        is refused whole (TransactionConflictError) before the
+        batch, its evidence item, or any record is written, so a
+        refused delivery leaves no orphan a retry could silently
+        honour. A correction arrives as a new transaction with a
+        new id.
         """
         case = self._store.get_case(case_id)
         if case is None:
@@ -643,6 +657,28 @@ class TypologyService:
         existing = self._typology.get_transaction_batch(case_id, digest)
         if existing is not None:
             return existing
+        # Identity check, before anything is written: an id the
+        # case already holds must arrive with identical content,
+        # or the delivery contradicts the file and is refused
+        # whole. Byte-identical re-deliveries are deduplicated —
+        # stored once, never counted twice by the engine.
+        stored = {
+            t.transaction_id: t
+            for t in self._typology.list_transactions(case_id)
+        }
+        fresh: list[Transaction] = []
+        for txn in transactions:
+            prior = stored.get(txn.transaction_id)
+            if prior is None:
+                fresh.append(txn)
+            elif prior != txn:
+                raise TransactionConflictError(
+                    f"case {case_id}: transaction {txn.transaction_id} "
+                    "is already on the case file with different "
+                    "content; a transaction id names one record "
+                    "forever — deliver the correction as a new "
+                    "transaction with a new id"
+                )
         batch = TransactionBatch(
             case_id=case_id,
             account_id=case.account_id,
@@ -681,7 +717,7 @@ class TypologyService:
                     actor=actor,
                 )
         self._typology.add_transaction_batch(batch)
-        self._typology.add_transactions(case_id, batch.batch_id, transactions)
+        self._typology.add_transactions(case_id, batch.batch_id, fresh)
         self._store.append_audit(
             AuditEvent(
                 case_id=case_id,
@@ -691,6 +727,7 @@ class TypologyService:
                     "batch_id": batch.batch_id,
                     "account_id": case.account_id,
                     "transactions": len(transactions),
+                    "already_stored": len(transactions) - len(fresh),
                     "content_sha256": digest,
                     "evidence_seq": item.seq,
                 },
