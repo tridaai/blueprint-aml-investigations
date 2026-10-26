@@ -51,6 +51,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from . import __version__
 from .access import (
     ACCESS_POLICY_VERSION,
     ACCESS_ROLES,
@@ -367,7 +368,7 @@ def create_app(services: Services | None = None) -> FastAPI:
     configure_logging(services.settings.log_level)
     app = FastAPI(
         title="AML Alert Investigation & Case File Agent",
-        version="0.1.0",
+        version=__version__,
     )
     app.state.services = services
 
