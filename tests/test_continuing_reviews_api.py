@@ -25,6 +25,7 @@ from aml_investigations.models import Alert, RulePack
 from aml_investigations.object_store import LocalObjectStore
 from aml_investigations.profiles import ProfileService
 from aml_investigations.quarantine import QuarantineService
+from aml_investigations.reporting import ReportingService
 from aml_investigations.reviews import ContinuingReviewService
 from aml_investigations.sar import SarNarrativeService
 from aml_investigations.screening import ListScreeningFeed, ScreeningService
@@ -189,6 +190,20 @@ def services(tmp_path: Path) -> Services:
         media_feed=media_feed,
         media=media,
         gateway=gateway,
+        reports=ReportingService(
+            store,
+            clocks,
+            screening_store=store,
+            typology_store=store,
+            investigation_store=store,
+            disposition_store=store,
+            narrative_store=store,
+            approval_store=store,
+            review_store=store,
+            media_store=store,
+            ledger_store=store,
+            quarantine=quarantine,
+        ),
     )
 
 

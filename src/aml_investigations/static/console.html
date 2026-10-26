@@ -97,6 +97,7 @@
 </header>
 <main>
   <aside>
+    <button id="reports-open" class="ghost" type="button" style="margin-bottom:14px;">Management reports</button>
     <h2>Case queue</h2>
     <div class="queue-tools">
       <select id="queue-sort" aria-label="Sort queue">
@@ -963,6 +964,97 @@ function renderCosts(ws, R) {
   }
 }
 
+/* --- management reports (R17) ------------------------------------------
+   The pack is a derived read-model served by the reports routes:
+   queue ageing, the clock board with deadline performance, the
+   rubber-stamp metrics, and operations. Rendered as text like
+   everything else here; the view adds no write path. */
+async function renderReports() {
+  const ws = $("workspace");
+  clear(ws);
+  const head = panel(ws, "Management reports");
+  head.append(el("p", "empty", "Building the pack from the stored artefacts…"));
+  const result = await api("GET", "/reports/pack");
+  clear(ws);
+  if (!result.ok) {
+    const section = panel(ws, "Management reports");
+    section.append(el("p", "empty", errText(result)));
+    return;
+  }
+  const pack = result.data;
+  const top = panel(ws, "Management reports — derived, never stored");
+  top.append(kvTable([
+    ["Pack", pack.pack_id],
+    ["Report version", pack.report_version],
+    ["As of", pack.as_of],
+    ["Performance window", (pack.window_start || "all recorded history") + " → " + (pack.window_end || pack.as_of)],
+    ["Artefacts read", Object.entries(pack.inputs || {}).map(([k, v]) => k + " " + v).join(" · ")],
+  ]));
+
+  const ageing = pack.queue_ageing;
+  const qa = panel(ws, "Queue ageing — " + ageing.open_cases + " open cases");
+  qa.append(el("h3", null, "By status"));
+  qa.append(dataTable(["Status", "Open", "Oldest (days)", "Median age (days)"],
+    ageing.by_status.map((r) => [r.key, String(r.open_cases), String(r.oldest_age_days), String(r.median_age_days)])));
+  qa.append(el("h3", null, "Oldest open cases"));
+  qa.append(dataTable(["Case", "Status", "Rule", "Severity", "Detected", "Age (days)"],
+    ageing.oldest.map((c) => [c.case_id, c.status, c.rule_id, c.severity, c.detected_on, String(c.age_days)])));
+  qa.append(el("h3", null, "Waiting on a second person (confirmations)"));
+  qa.append(dataTable(["Case", "Disposition analyst", "Waiting on", "Since", "Days"],
+    ageing.waiting_confirmation.map((w) => [w.case_id, w.disposition_analyst_id, w.waiting_on_role, w.since, String(w.days_waiting)])));
+  qa.append(el("h3", null, "Waiting in the SAR path"));
+  qa.append(dataTable(["Case", "Stage", "Waiting on", "Disposition analyst", "Since", "Days"],
+    ageing.waiting_sar.map((w) => [w.case_id, w.stage, w.waiting_on_role, w.disposition_analyst_id, w.since, String(w.days_waiting)])));
+
+  const board = pack.clock_board;
+  const cb = panel(ws, "Clock board — regulatory deadlines");
+  cb.append(el("h3", null, "Filing clocks by state"));
+  cb.append(dataTable(["State", "Cases"], Object.entries(board.filing_by_state).map(([k, v]) => [k, String(v)])));
+  cb.append(el("h3", null, "Overdue"));
+  if (board.overdue.length) {
+    cb.append(dataTable(["Case", "Clock", "Deadline kind", "Deadline", "Days overdue"],
+      board.overdue.map((o) => [o.case_id, o.clock_kind, o.deadline_kind, o.deadline, String(o.days_overdue)])));
+  } else {
+    cb.append(el("p", "empty", "No clock stands overdue."));
+  }
+  const perf = board.performance;
+  cb.append(kvTable([
+    ["Clocks ended in window", String(perf.clocks_ended)],
+    ["On time", String(perf.on_time)],
+    ["Late (a late documented decision counts as late)", String(perf.late)],
+  ]));
+
+  const rs = pack.rubber_stamp;
+  const rb = panel(ws, "Rubber-stamp metrics — measurements, not scores");
+  rb.append(kvTable([
+    ["Cases decided on the first record draft", String(rs.decided_on_first_draft) + " of " + String(rs.record_cases_decided)],
+    ["Cases decided on a revised record", String(rs.decided_on_revised_record)],
+    ["Findings added / removed / changed before decision", String(rs.findings_added) + " / " + String(rs.findings_removed) + " / " + String(rs.findings_changed)],
+    ["Narratives approved without any edit", String(rs.approved_without_edit) + " of " + String(rs.narratives_approved)],
+    ["Narratives approved after a re-draft", String(rs.approved_after_redraft)],
+    ["Confirmations required / confirmed / declined / awaiting",
+      String(rs.confirmations_required) + " / " + String(rs.confirmations_confirmed) + " / " + String(rs.confirmations_declined) + " / " + String(rs.confirmations_awaiting)],
+  ]));
+  rb.append(el("h3", null, "Decision times (hours, median / p90)"));
+  rb.append(dataTable(["Actor", "Gate", "Decisions", "Median", "p90"],
+    rs.decision_times.map((d) => [d.actor_id, d.gate, String(d.decisions), String(d.median_hours), String(d.p90_hours)])));
+  for (const note of rs.cannot_measure || []) rb.append(el("p", "stmt", "Cannot measure: " + note));
+
+  const ops = pack.ops;
+  const op = panel(ws, "Operations");
+  op.append(el("h3", null, "Typology findings"));
+  op.append(dataTable(["Check", "Pack", "Runs", "Findings", "Cases", "Per run"],
+    ops.typology.map((t) => [t.typology_id, t.rule_pack_id + " " + t.rule_pack_version, String(t.pack_runs), String(t.findings), String(t.cases_with_findings), t.findings_per_run])));
+  op.append(el("h3", null, "Screening by list version"));
+  op.append(dataTable(["List", "Version", "Cases screened", "Hits", "Open", "Cleared", "Namesake-cleared", "Confirmed"],
+    ops.screening.map((s) => [s.list_kind, s.snapshot_version, String(s.cases_screened), String(s.hits), String(s.open), String(s.cleared), String(s.namesake_cleared), String(s.confirmed)])));
+  op.append(kvTable([
+    ["Quarantine records / matches", ops.quarantine.available ? String(ops.quarantine.records) + " / " + String(ops.quarantine.matches) : "not wired"],
+    ["Media assessments", String(ops.media_assessments)],
+    ["Model calls / drafting cost", String(ops.model_calls) + " / $" + ops.model_cost_usd],
+  ]));
+}
+
 /* --- boot --------------------------------------------------------------- */
 async function boot() {
   loadIdentity();
@@ -976,6 +1068,7 @@ $("analyst-name").addEventListener("change", saveIdentity);
 $("analyst-role").addEventListener("change", saveIdentity);
 $("queue-sort").addEventListener("change", renderQueue);
 $("queue-filter").addEventListener("change", renderQueue);
+$("reports-open").addEventListener("click", renderReports);
 boot();
 </script>
 </body>

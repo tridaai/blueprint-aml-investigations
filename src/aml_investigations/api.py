@@ -1415,6 +1415,67 @@ def create_app(services: Services | None = None) -> FastAPI:
         day and profile — calls, tokens, and exact cost."""
         return {"rows": services.gateway.portfolio_rollup()}
 
+    # --- management reporting (R17): derived read-models --------
+    @app.get("/reports/pack")
+    async def report_pack(
+        as_of: date | None = None,
+        window_start: date | None = None,
+        window_end: date | None = None,
+    ):
+        """The full management report at ``as_of`` (today when
+        omitted): queue ageing, the clock board with deadline
+        performance over the window, the rubber-stamp metrics,
+        and operations. A pure read — the pack is derived from
+        the stored artefacts at the named date, content-addressed,
+        and reproducible; building it writes nothing."""
+        pack = services.reports.build_pack(
+            as_of=as_of or date.today(),
+            window_start=window_start,
+            window_end=window_end,
+        )
+        return pack.model_dump(mode="json")
+
+    @app.get("/reports/queue-ageing")
+    async def report_queue_ageing(as_of: date | None = None):
+        """The queue-ageing section alone: open cases by status
+        x age bucket, ageing by rule and severity, the oldest
+        cases, and the two human-wait queues aged separately."""
+        pack = services.reports.build_pack(as_of=as_of or date.today())
+        return pack.queue_ageing.model_dump(mode="json")
+
+    @app.get("/reports/clock-board")
+    async def report_clock_board(
+        as_of: date | None = None,
+        window_start: date | None = None,
+        window_end: date | None = None,
+    ):
+        """The clock-board section alone: filing and continuing
+        clocks by state, the overdue list, and deadline
+        performance over the window."""
+        pack = services.reports.build_pack(
+            as_of=as_of or date.today(),
+            window_start=window_start,
+            window_end=window_end,
+        )
+        return pack.clock_board.model_dump(mode="json")
+
+    @app.get("/reports/rubber-stamp")
+    async def report_rubber_stamp(as_of: date | None = None):
+        """The rubber-stamp section alone (Law 8): draft-vs-final
+        measurement for investigation records and SAR narratives,
+        confirmation patterns, and decision-latency distributions.
+        Measurements only — it scores nobody."""
+        pack = services.reports.build_pack(as_of=as_of or date.today())
+        return pack.rubber_stamp.model_dump(mode="json")
+
+    @app.get("/reports/ops")
+    async def report_ops(as_of: date | None = None):
+        """The operations section alone: typology volume by check
+        and rule-pack version, screening outcomes by list version,
+        quarantine counts, media bands, and model spend."""
+        pack = services.reports.build_pack(as_of=as_of or date.today())
+        return pack.ops.model_dump(mode="json")
+
     return app
 
 

@@ -171,6 +171,28 @@ Usage:
                                     for the case, in call order
     aml-agent portfolio-costs     the portfolio rollup: all ledgered
                                     calls grouped by day and profile
+    aml-agent report-pack [--as-of YYYY-MM-DD]
+              [--window-start YYYY-MM-DD] [--window-end YYYY-MM-DD]
+                                    the full management report (R17):
+                                    queue ageing, clock board with
+                                    deadline performance, rubber-stamp
+                                    metrics, operations — derived in
+                                    code from the stored artefacts at
+                                    the named date, content-addressed
+    aml-agent report-queue [--as-of YYYY-MM-DD]
+                                    the queue-ageing section alone
+    aml-agent report-clocks [--as-of YYYY-MM-DD]
+              [--window-start YYYY-MM-DD] [--window-end YYYY-MM-DD]
+                                    the clock-board section alone
+    aml-agent report-rubber-stamp [--as-of YYYY-MM-DD]
+                                    the rubber-stamp section alone
+                                    (Law 8): draft-vs-final measures,
+                                    confirmation patterns, decision
+                                    times — measurements, not scores
+    aml-agent report-ops [--as-of YYYY-MM-DD]
+                                    the operations section alone:
+                                    typology, screening, quarantine,
+                                    media, model spend
 """
 
 from __future__ import annotations
@@ -354,6 +376,20 @@ def main(argv: list[str] | None = None) -> int:
     p_case_ledger = sub.add_parser("case-ledger")
     p_case_ledger.add_argument("case_id")
     sub.add_parser("portfolio-costs")
+    p_report_pack = sub.add_parser("report-pack")
+    p_report_pack.add_argument("--as-of", default=None)
+    p_report_pack.add_argument("--window-start", default=None)
+    p_report_pack.add_argument("--window-end", default=None)
+    p_report_queue = sub.add_parser("report-queue")
+    p_report_queue.add_argument("--as-of", default=None)
+    p_report_clocks = sub.add_parser("report-clocks")
+    p_report_clocks.add_argument("--as-of", default=None)
+    p_report_clocks.add_argument("--window-start", default=None)
+    p_report_clocks.add_argument("--window-end", default=None)
+    p_report_rubber = sub.add_parser("report-rubber-stamp")
+    p_report_rubber.add_argument("--as-of", default=None)
+    p_report_ops = sub.add_parser("report-ops")
+    p_report_ops.add_argument("--as-of", default=None)
     args = parser.parse_args(argv)
 
     services = build_services()
@@ -966,6 +1002,31 @@ def main(argv: list[str] | None = None) -> int:
                     indent=2,
                 )
             )
+        elif args.command in (
+            "report-pack",
+            "report-queue",
+            "report-clocks",
+            "report-rubber-stamp",
+            "report-ops",
+        ):
+            from datetime import date as _date
+
+            def _parse(value):
+                return _date.fromisoformat(value) if value else None
+
+            pack = services.reports.build_pack(
+                as_of=_parse(args.as_of) or _date.today(),
+                window_start=_parse(getattr(args, "window_start", None)),
+                window_end=_parse(getattr(args, "window_end", None)),
+            )
+            section = {
+                "report-pack": pack,
+                "report-queue": pack.queue_ageing,
+                "report-clocks": pack.clock_board,
+                "report-rubber-stamp": pack.rubber_stamp,
+                "report-ops": pack.ops,
+            }[args.command]
+            print(json.dumps(section.model_dump(mode="json"), indent=2))
     except AmlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

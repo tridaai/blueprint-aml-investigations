@@ -33,6 +33,7 @@ from .ports import (
 )
 from .profiles import ProfileService
 from .quarantine import QuarantineService
+from .reporting import ReportingService
 from .reviews import ContinuingReviewService
 from .sar import SarNarrativeService
 from .screening import ReferenceScreeningFeed, ScreeningService
@@ -69,6 +70,7 @@ class Services:
     media_feed: AdverseMediaSource
     media: AdverseMediaService
     gateway: ModelGateway
+    reports: ReportingService
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -203,6 +205,24 @@ def build_services(settings: Settings | None = None) -> Services:
         media_store=store,
         gateway=gateway,
     )
+    # R17: management reporting — a pure read-model over the
+    # same stores and the R8 clock derivation. It writes
+    # nothing; the pack it builds is content-addressed and
+    # reproducible at its named as_of.
+    reports = ReportingService(
+        store,
+        clocks,
+        screening_store=store,
+        typology_store=store,
+        investigation_store=store,
+        disposition_store=store,
+        narrative_store=store,
+        approval_store=store,
+        review_store=store,
+        media_store=store,
+        ledger_store=store,
+        quarantine=quarantine,
+    )
     return Services(
         settings=settings,
         store=store,
@@ -228,4 +248,5 @@ def build_services(settings: Settings | None = None) -> Services:
         media_feed=media_feed,
         media=media,
         gateway=gateway,
+        reports=reports,
     )
