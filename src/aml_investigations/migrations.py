@@ -31,7 +31,12 @@ def run_migrations(conn, migrations_dir: Path, dialect: str, paramstyle: str) ->
         "version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
     )
     rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
-    applied = {row[0] for row in rows}
+    # Rows arrive as tuples (sqlite3, psycopg default) or mappings
+    # (psycopg dict_row, which SqlCaseStore.postgres uses) depending
+    # on the caller's row factory — read the column either way.
+    applied = {
+        row["version"] if isinstance(row, dict) else row[0] for row in rows
+    }
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).isoformat()
