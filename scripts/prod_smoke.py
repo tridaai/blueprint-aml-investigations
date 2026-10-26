@@ -142,7 +142,17 @@ def main() -> int:
     base = f"http://127.0.0.1:{port}"
     client: httpx.Client | None = None
     try:
-        client = httpx.Client(base_url=base, timeout=30.0)
+        # R18: the smoke drives the deployment as the BSA
+        # officer — the identity entitled to every read it makes,
+        # including the sealed case-file export.
+        client = httpx.Client(
+            base_url=base,
+            timeout=30.0,
+            headers={
+                "x-caller-id": "o.reyes",
+                "x-caller-role": "bsa_officer",
+            },
+        )
 
         def wait_ready() -> None:
             deadline = time.time() + 60

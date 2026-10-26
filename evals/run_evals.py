@@ -107,6 +107,14 @@ Zero-tolerance counters:
   - rubber-stamp metrics wrong (R17) ............. must be 0
   - report sections from unstated sources (R17)... must be 0
   - report positive paths failing (R17) .......... must be 0
+  - cross-assignee case reads leaking (R18) ...... must be 0
+  - case existence leaking via refusal shape (R18) must be 0
+  - read-only-role writes accepted (R18) ......... must be 0
+  - artefact-family restrictions bypassed (R18).. must be 0
+  - exports taken by a non-officer (R18) ......... must be 0
+  - CLI paths bypassing the access policy (R18).. must be 0
+  - access denials left unrecorded (R18) ......... must be 0
+  - access positive paths failing (R18) .......... must be 0
 
 Exit code 0 iff the gate passes.
 """
@@ -479,6 +487,16 @@ def main() -> int:
         "report_rubber_stamp_wrong": 0,
         "report_unstated_source": 0,
         "report_positive_paths_failed": 0,
+        # R18 access-control counters
+        "access_cases_graded": 0,
+        "access_cross_assignee_read_leaks": 0,
+        "access_existence_leaks": 0,
+        "access_readonly_writes_accepted": 0,
+        "access_family_bypasses": 0,
+        "access_export_by_non_officer": 0,
+        "access_cli_bypasses": 0,
+        "access_unrecorded_denials": 0,
+        "access_positive_paths_failed": 0,
     }
 
     store = InMemoryCaseStore()
@@ -3800,7 +3818,16 @@ def main() -> int:
         log_level="WARNING",
     )
     _capp = _create_app(_build_services(_csettings))
-    _client = _TestClient(_capp)
+    # R18: the console scenario drives the API as the BSA
+    # officer — the identity the console's reads and gate writes
+    # are entitled to.
+    _client = _TestClient(
+        _capp,
+        headers={
+            "x-caller-id": "o.reyes",
+            "x-caller-role": "bsa_officer",
+        },
+    )
 
     # The page itself: served, HTML, portfolio footer present.
     _page = _client.get("/console")
@@ -5576,7 +5603,15 @@ def main() -> int:
 
     from aml_investigations.api import create_app as _rcreate_app
 
-    _rclient = _RTestClient(_rcreate_app(_rsvc2))
+    # R18: report reads are portfolio-level — the scenario
+    # drives them as the BSA officer.
+    _rclient = _RTestClient(
+        _rcreate_app(_rsvc2),
+        headers={
+            "x-caller-id": "o.reyes",
+            "x-caller-role": "bsa_officer",
+        },
+    )
     _rresp = _rclient.get("/reports/pack", params={"as_of": "2026-10-20"})
     if (
         not _seed_cases
@@ -5593,7 +5628,370 @@ def main() -> int:
         f"{counters['report_rubber_stamp_wrong']}"
     )
 
-    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9+R10+R11+R12+R13+R14+R15+R16+R17 counters")
+    # ---------------------------------------------------------------
+    # Scenario 21 (R18): access control — role-scoped case access
+    # and retrieval ACLs. Two cases on the production wiring: one
+    # assigned to a.rivera, one left unassigned. Every refusal the
+    # probes earn must also stand in the denial record: the
+    # scenario counts its expected refusals and reconciles them
+    # against the audit log at the end.
+    # ---------------------------------------------------------------
+    _atmp = Path(tempfile.mkdtemp(prefix="aml-evals-access-"))
+    from fastapi.testclient import TestClient as _ATestClient
+
+    from aml_investigations.access import identity_for_actor as _ident
+    from aml_investigations.api import create_app as _acreate_app
+    from aml_investigations.config import Settings as _ASettings
+    from aml_investigations.wiring import build_services as _abuild
+
+    _arepo = Path(__file__).resolve().parents[1]
+    _asettings = _ASettings(
+        database_url=None,
+        sqlite_path=_atmp / "aml.db",
+        migrations_dir=_arepo / "migrations",
+        object_store_dir=_atmp / "objects",
+        s3_endpoint_url=None,
+        s3_bucket="aml-evidence",
+        seed_alerts_path=_arepo / "data" / "seed_alerts.json",
+        screening_lists_path=_arepo / "data" / "screening_lists.json",
+        transaction_streams_path=_arepo
+        / "data"
+        / "transaction_streams.json",
+        typology_rules_path=_arepo / "data" / "typology_rules.json",
+        adverse_media_path=_arepo / "data" / "adverse_media.json",
+        model_profiles_path=_arepo / "data" / "model_profiles.json",
+        model_prices_path=_arepo / "data" / "model_prices.json",
+        model_profile="offline",
+        log_level="WARNING",
+    )
+    _asvc = _abuild(_asettings)
+    _aclient = _ATestClient(_acreate_app(_asvc))
+    _OFFICER_H = {"x-caller-id": "o.reyes", "x-caller-role": "bsa_officer"}
+    _REVIEWER_H = {"x-caller-id": "r.okafor", "x-caller-role": "l2_reviewer"}
+    _AUDITOR_H = {
+        "x-caller-id": "a.auditor",
+        "x-caller-role": "auditor_readonly",
+    }
+    _RIVERA_H = {"x-caller-id": "a.rivera", "x-caller-role": "l1_analyst"}
+    _CHEN_H = {"x-caller-id": "b.chen", "x-caller-role": "l1_analyst"}
+
+    import json as _ajson2
+
+    _seed_alert_ids = [
+        row["alert_id"]
+        for row in _ajson2.loads(
+            (_arepo / "data" / "seed_alerts.json").read_text()
+        )["alerts"]
+    ]
+    _acase_a = _asvc.intake.open_case(
+        _seed_alert_ids[0], actor="intake-service"
+    )
+    _acase_b = _asvc.intake.open_case(
+        _seed_alert_ids[1], actor="intake-service"
+    )
+    _asvc.access.assign_case(
+        _acase_a.case_id,
+        assignee_id="a.rivera",
+        actor=_ident("o.reyes", "bsa_officer"),
+    )
+    counters["access_cases_graded"] = 2
+    _refusals = 0
+
+    # Cross-assignee reads: every case family, answered with the
+    # not-found shape — anything else is a leak.
+    _family_reads = [
+        "",
+        "/evidence",
+        "/evidence/verify",
+        "/audit",
+        "/screening",
+        "/transactions",
+        "/typologies",
+        "/investigation",
+        "/dispositions",
+        "/sar",
+        "/sar/verification",
+        "/sar/approval",
+        "/seal",
+        "/legal-hold",
+        "/clock",
+        "/continuing-reviews",
+        "/quarantine",
+        "/profile",
+        "/media/assessments",
+        "/model-ledger",
+        "/model-costs",
+    ]
+    for _suffix in _family_reads:
+        _resp = _aclient.get(
+            f"/cases/{_acase_a.case_id}{_suffix}", headers=_CHEN_H
+        )
+        _refusals += 1
+        if _resp.status_code != 404:
+            counters["access_cross_assignee_read_leaks"] += 1
+
+    # Existence: byte-for-byte against the nonexistent case, and
+    # against an unknown customer for the customer doors.
+    _hidden = _aclient.get(f"/cases/{_acase_a.case_id}", headers=_CHEN_H)
+    _missing = _aclient.get("/cases/case-nope", headers=_CHEN_H)
+    # Only the hidden case records a denial: a case that does
+    # not exist has nothing to protect and refuses nobody.
+    _refusals += 1
+    if _hidden.status_code != 404 or _hidden.content != _missing.content:
+        counters["access_existence_leaks"] += 1
+    _cust = _acase_a.customer_id
+    _hidden_c = _aclient.get(
+        f"/customers/{_cust}/counterparties", headers=_CHEN_H
+    )
+    _missing_c = _aclient.get(
+        "/customers/CUST-NOPE/counterparties", headers=_CHEN_H
+    )
+    _refusals += 1
+    if (
+        _hidden_c.status_code != 404
+        or _hidden_c.content != _missing_c.content
+    ):
+        counters["access_existence_leaks"] += 1
+    # Anonymous reads hide the same way.
+    _anon = _aclient.get(f"/cases/{_acase_a.case_id}")
+    _refusals += 1
+    if _anon.status_code != 404 or _anon.content != _missing.content:
+        counters["access_existence_leaks"] += 1
+
+    # The read-only role: reads across the book, writes nothing —
+    # including writes its gate identity would otherwise allow.
+    _ro_writes = [
+        (
+            "post",
+            f"/cases/{_acase_b.case_id}/transitions",
+            {"target": "assembling", "actor": "investigation-service"},
+        ),
+        (
+            "post",
+            f"/cases/{_acase_b.case_id}/evidence",
+            {
+                "kind": "transaction_window",
+                "content_base64": base64.b64encode(b"{}").decode(),
+                "source_ref": "core-banking:test",
+                "captured_by": "evidence-service",
+            },
+        ),
+        (
+            "post",
+            f"/cases/{_acase_b.case_id}/disposition",
+            {
+                "analyst_id": "a.auditor",
+                "analyst_role": "auditor_readonly",
+                "outcome": "close_no_action",
+                "rationale_codes": ["no_suspicious_activity_identified"],
+                "record_id": "rec-x",
+                "record_version": 1,
+            },
+        ),
+    ]
+    for _method, _url, _body in _ro_writes:
+        _resp = _aclient.request(_method, _url, json=_body, headers=_AUDITOR_H)
+        _refusals += 1
+        if (
+            _resp.status_code != 403
+            or _resp.json().get("code") != "readonly_role"
+        ):
+            counters["access_readonly_writes_accepted"] += 1
+
+    # Family doors: export belongs to the officer; reports,
+    # queues, shared counterparties, daily costs, and the denial
+    # record hold theirs. Each family probed.
+    _family_probes = [
+        (_REVIEWER_H, f"/cases/{_acase_a.case_id}/export", "export"),
+        (_RIVERA_H, f"/cases/{_acase_a.case_id}/export", "export"),
+        (_AUDITOR_H, f"/cases/{_acase_a.case_id}/export", "export"),
+        (_RIVERA_H, "/reports/pack", "reports"),
+        (_REVIEWER_H, "/reports/pack", "reports"),
+        (None, "/reports/pack", "reports"),
+        (_RIVERA_H, "/queues/pending-confirmation", "confirmation_queue"),
+        (_RIVERA_H, "/queues/escalations", "escalation_queue"),
+        (_RIVERA_H, "/counterparties/shared", "shared_counterparties"),
+        (_RIVERA_H, "/model-costs/daily", "daily_costs"),
+        (_RIVERA_H, "/access/denials", "denials"),
+    ]
+    for _headers, _url, _family in _family_probes:
+        _resp = _aclient.get(_url, headers=_headers)
+        _refusals += 1
+        if _family == "export":
+            if (
+                _resp.status_code != 403
+                or _resp.json().get("family") != "export"
+            ):
+                counters["access_export_by_non_officer"] += 1
+        elif (
+            _resp.status_code != 403
+            or _resp.json().get("code") != "role_not_permitted"
+            or _resp.json().get("family") != _family
+        ):
+            counters["access_family_bypasses"] += 1
+
+    # Positive paths: the assignee works their case; book roles
+    # read across; reassignment takes effect immediately;
+    # reporting answers the officer and the auditor.
+    _positives = [
+        _aclient.get(f"/cases/{_acase_a.case_id}", headers=_RIVERA_H),
+        _aclient.get(f"/cases/{_acase_a.case_id}/evidence", headers=_RIVERA_H),
+        _aclient.post(
+            f"/cases/{_acase_a.case_id}/evidence",
+            json={
+                "kind": "transaction_window",
+                "content_base64": base64.b64encode(b"{}").decode(),
+                "source_ref": "core-banking:test",
+                "captured_by": "evidence-service",
+            },
+            headers=_RIVERA_H,
+        ),
+        _aclient.get(f"/cases/{_acase_a.case_id}", headers=_REVIEWER_H),
+        _aclient.get(f"/cases/{_acase_a.case_id}", headers=_AUDITOR_H),
+        _aclient.get("/reports/pack", headers=_OFFICER_H),
+        _aclient.get("/reports/pack", headers=_AUDITOR_H),
+        _aclient.get("/access/denials", headers=_OFFICER_H),
+    ]
+    _assign_resp = _aclient.post(
+        f"/cases/{_acase_b.case_id}/assignment",
+        json={
+            "assignee_id": "b.chen",
+            "actor_id": "o.reyes",
+            "actor_role": "bsa_officer",
+        },
+        headers=_OFFICER_H,
+    )
+    _positives.append(_assign_resp)
+    _positives.append(
+        _aclient.get(f"/cases/{_acase_b.case_id}", headers=_CHEN_H)
+    )
+    if any(r.status_code not in (200, 201) for r in _positives):
+        counters["access_positive_paths_failed"] += 1
+    # The assignment stands on the chain and in the audit log.
+    _kinds = [
+        i.kind for i in _asvc.evidence.list_items(_acase_b.case_id)
+    ]
+    _events = [
+        e.event for e in _asvc.store.list_audit(_acase_b.case_id)
+    ]
+    if "case_assignment" not in _kinds or "case_assigned" not in _events:
+        counters["access_positive_paths_failed"] += 1
+    # Reassignment is effective the moment it is recorded.
+    _aclient.post(
+        f"/cases/{_acase_b.case_id}/assignment",
+        json={
+            "assignee_id": "a.rivera",
+            "actor_id": "o.reyes",
+            "actor_role": "bsa_officer",
+        },
+        headers=_OFFICER_H,
+    )
+    _gone = _aclient.get(f"/cases/{_acase_b.case_id}", headers=_CHEN_H)
+    _refusals += 1
+    if (
+        _gone.status_code != 404
+        or _aclient.get(
+            f"/cases/{_acase_b.case_id}", headers=_RIVERA_H
+        ).status_code
+        != 200
+    ):
+        counters["access_positive_paths_failed"] += 1
+
+    # CLI parity: the command line enforces the same policy
+    # against its own deployment database — no bypass.
+    import io as _io
+    import os as _os
+    from contextlib import redirect_stdout as _redirect
+
+    from aml_investigations.cli import main as _cli_main
+
+    _clitmp = Path(tempfile.mkdtemp(prefix="aml-evals-access-cli-"))
+    _saved_env = {
+        k: _os.environ.get(k)
+        for k in ("AML_SQLITE_PATH", "OBJECT_STORE_DIR", "DATABASE_URL")
+    }
+    _os.environ["AML_SQLITE_PATH"] = str(_clitmp / "cli.db")
+    _os.environ["OBJECT_STORE_DIR"] = str(_clitmp / "objects")
+    _os.environ.pop("DATABASE_URL", None)
+    try:
+        def _cli(argv):
+            _buf = _io.StringIO()
+            with _redirect(_buf):
+                _code = _cli_main(argv)
+            return _code, _buf.getvalue()
+
+        _code, _out = _cli(
+            [
+                "--caller", "o.reyes", "--caller-role", "bsa_officer",
+                "intake", _seed_alert_ids[0],
+            ]
+        )
+        _cli_case = None
+        if _code == 0:
+            import json as _ajson
+
+            _cli_case = _ajson.loads(_out)["case_id"]
+        if _cli_case is None:
+            counters["access_positive_paths_failed"] += 1
+        else:
+            # Assign the CLI case to a.rivera first — an
+            # unassigned case is lawfully readable by any
+            # analyst; the probes below grade a stranger's case.
+            _acode, _ = _cli(
+                [
+                    "--caller", "o.reyes", "--caller-role", "bsa_officer",
+                    "assign", _cli_case, "a.rivera",
+                    "--actor", "o.reyes", "--role", "bsa_officer",
+                ]
+            )
+            if _acode != 0:
+                counters["access_positive_paths_failed"] += 1
+            _cli_probes = [
+                # A stranger to the case reads nothing.
+                (["--caller", "b.chen", "--caller-role", "l1_analyst",
+                  "show", _cli_case], False),
+                # An analyst identity gets no report.
+                (["--caller", "b.chen", "--caller-role", "l1_analyst",
+                  "report-pack"], False),
+                # The auditor writes nothing, even at a gate.
+                (["--caller", "a.aud", "--caller-role", "auditor_readonly",
+                  "verify-sar", _cli_case], False),
+                # Export is the officer's alone.
+                (["--caller", "r.okafor", "--caller-role", "l2_reviewer",
+                  "export", _cli_case], False),
+                # The officer reads the case.
+                (["--caller", "o.reyes", "--caller-role", "bsa_officer",
+                  "show", _cli_case], True),
+                # Reports derive under system scope with no caller.
+                (["report-pack"], True),
+            ]
+            for _argv, _should_pass in _cli_probes:
+                _code, _ = _cli(_argv)
+                if _should_pass and _code != 0:
+                    counters["access_positive_paths_failed"] += 1
+                if not _should_pass and _code == 0:
+                    counters["access_cli_bypasses"] += 1
+    finally:
+        for _k, _v in _saved_env.items():
+            if _v is None:
+                _os.environ.pop(_k, None)
+            else:
+                _os.environ[_k] = _v
+
+    # Every refusal the HTTP probes earned stands recorded —
+    # an unrecorded denial is a hole in the audit trail.
+    if len(_asvc.access.denials()) != _refusals:
+        counters["access_unrecorded_denials"] += 1
+    print(
+        "scenario 21 (access control): graded "
+        f"{counters['access_cases_graded']} cases, "
+        f"{_refusals} refusals recorded, cross-assignee leaks "
+        f"{counters['access_cross_assignee_read_leaks']}, existence "
+        f"leaks {counters['access_existence_leaks']}, cli bypasses "
+        f"{counters['access_cli_bypasses']}"
+    )
+
+    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9+R10+R11+R12+R13+R14+R15+R16+R17+R18 counters")
     for key, value in counters.items():
         print(f"  {key}: {value}")
     zero_tolerance = [
@@ -5706,6 +6104,14 @@ def main() -> int:
         "report_rubber_stamp_wrong",
         "report_unstated_source",
         "report_positive_paths_failed",
+        "access_cross_assignee_read_leaks",
+        "access_existence_leaks",
+        "access_readonly_writes_accepted",
+        "access_family_bypasses",
+        "access_export_by_non_officer",
+        "access_cli_bypasses",
+        "access_unrecorded_denials",
+        "access_positive_paths_failed",
     ]
     passed = all(counters[k] == 0 for k in zero_tolerance) and counters["cases_opened"] == len(ALERTS)
     print("GATE: PASS" if passed else "GATE: FAIL")
