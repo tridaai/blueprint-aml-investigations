@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R17 of 20)
+## What is built at this round (R18 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -482,10 +482,45 @@ docker compose up --build
   fixture book as Scenario 20 (every headline figure, the
   late-counts-late rule, and the rubber-stamp metrics are
   zero-tolerance).
+- **Access control (R18)** — identity, which the gates have
+  always required for writes, now governs reads too. One
+  access module (`access.py`) holds a versioned role policy as
+  data (`2026.10.1`): `l1_analyst`, `l2_reviewer`,
+  `bsa_officer`, `auditor_readonly`, `system` — per role, a
+  scope (own book or the whole book) and the artefact families
+  it may read (evidence, records, narratives, profiles, media,
+  ledger, reports, …). Cases carry an assignment, set by a
+  recorded act — a `case_assignment` item on the evidence
+  chain plus an audit event; an L1 analyst reads cases assigned
+  to them and the unassigned pickup queue, never another
+  analyst's case; reviewer and officer read across the book;
+  the auditor reads everything and writes *nothing* — every
+  write is refused `readonly_role` before gate logic runs.
+  Refusals a caller may see are 403s with a coded reason
+  (`role_not_permitted` / `not_assignee` / `readonly_role`) and
+  the family they name; a caller with no read right on a case
+  gets the same 404 body as a case that does not exist, so
+  existence is not leaked. Every refusal is recorded as an
+  `access_denied` audit event the officer and auditor can list
+  (`GET /access/denials`). Retrieval follows the same policy:
+  reports are portfolio-level (officer, auditor, system),
+  profiles and counterparty views follow the underlying cases,
+  and the sealed case-file export leaves only in a BSA
+  officer's hands. When a case is sealed, its evidence,
+  narratives, and records move into custody — the first and
+  second line stop reading them; the officer and auditor keep
+  them. The API enforces through the module on every route,
+  the CLI enforces the same checks (no CLI bypass), the
+  console sends its identity on reads, and internal
+  derivations (clocks, reporting) run under explicit system
+  scope rather than impersonating an analyst. Scenario 21 of
+  the eval gate probes every family cross-assignee, compares
+  the refusal shape byte-for-byte with the nonexistent-case
+  shape, and reconciles every refusal against the denial
+  record — all zero-tolerance.
 
-The rest — access control, the red team, and release
-hardening — lands in R18–R20 per the round map in
-`docs/architecture.md`.
+The rest — the red team and release hardening — lands in
+R19–R20 per the round map in `docs/architecture.md`.
 
 ## Configuration
 
@@ -522,7 +557,7 @@ server available:
 
 ```bash
 AML_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5433/aml_parity make test
-# the entire suite on the Postgres adapter — same 389 passes
+# the entire suite on the Postgres adapter — same 426 passes
 DATABASE_URL=postgresql://postgres@127.0.0.1:5433/aml_parity make prod-smoke
 # the real app on a fresh database, 20 lifecycle steps over HTTP
 AML_EVAL_DATABASE_URL=postgresql://postgres@127.0.0.1:5433/aml_parity make evals
@@ -578,7 +613,13 @@ transport (0), ledger costs not matching tokens × price
 (0), console queue inputs disagreeing (0), console workspace
 artefact kinds missing (0), console-only write paths (0),
 unescaped render paths in the console (0), and console
-positive paths failing (0). With a Postgres server provided,
+positive paths failing (0), cross-assignee case reads leaking
+(0), case existence leaking through the refusal shape (0),
+read-only-role writes accepted (0), artefact-family
+restrictions bypassed (0), exports taken by a non-officer
+(0), CLI paths bypassing the access policy (0), access
+denials left unrecorded (0), and access positive paths
+failing (0). With a Postgres server provided,
 the gate adds: Postgres migration failures (0), production
 smoke step failures (0), and suite outcome gaps between the
 Postgres and default profiles (0).
@@ -617,8 +658,9 @@ Postgres and default profiles (0).
   every composer and verifier that touches it — the whole file
   readable in the analyst console (R14), which renders it as
   text and acts on it only through the same gated routes.
-- The Postgres production profile is verified (R16): the full
-  test suite passes unchanged on PostgreSQL 16 (389 tests,
+- The Postgres production profile is verified (R16, and
+  re-verified every round since): the full test suite passes
+  unchanged on PostgreSQL 16 (426 tests as of R18,
   parity-graded in the eval gate), the migrations apply and
   re-run cleanly on an empty database, and the production
   smoke walks a case end to end over HTTP on a fresh database.

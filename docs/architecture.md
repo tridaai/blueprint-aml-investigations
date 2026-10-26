@@ -1392,6 +1392,111 @@ against a purpose-built book with hand-computed expectations:
 `report_rubber_stamp_wrong`, `report_unstated_source` and
 `report_positive_paths_failed` are zero-tolerance.
 
+## Access control (R18) — who may read what, in code
+
+The gates have always required a named person with a coded
+role for every *write*. R18 extends the same identity
+discipline to *reads*: one module, `access.py`, stands in
+front of case data for the API and the CLI, and the policy it
+enforces is data, not scattered conditionals.
+
+**The policy.** `ACCESS_POLICY_VERSION = "2026.10.1"`. Five
+roles: `l1_analyst`, `l2_reviewer`, `bsa_officer`,
+`auditor_readonly`, `system`. Each role states a *scope* —
+`assigned` (the analyst's own cases plus the unassigned
+pickup queue) or `book` (every case) — and the artefact
+families it may read: case, evidence, screening, transactions,
+typologies, records, dispositions, narratives, approvals,
+custody, export, clocks, reviews, quarantine, media, ledger,
+audit, profiles, assignment, plus the portfolio families
+(reports, daily costs, shared counterparties, denials, the
+two work queues). The gate vocabularies and the access
+vocabularies are one identity seen from two sides: a role
+hint in either (`analyst`, `senior_analyst`, `l2_reviewer`,
+`bsa_officer`, `auditor_readonly`, `system`) maps through
+`ROLE_MAP`; service actors are the system; a named person
+with no hint is an L1 analyst, the least-privilege scope.
+Callers assert identity with the `x-caller-id` /
+`x-caller-role` headers (the deployment's gateway asserts
+them; the console sends them); a write's own named actor is
+the caller when no header speaks.
+
+**Assignment.** `Case.assigned_analyst` — present since R1,
+never set — is now written by one act: `assign_case` records
+a `case_assignment` item on the evidence chain (through the
+funnel, so a sealed case refuses assignment like any other
+mutation) and a `case_assigned` audit event, then updates the
+case. Book roles and the system assign freely; an L1 analyst
+may only claim an *unassigned* case *for themselves*;
+reassignment takes effect the moment it is recorded. The
+demo path assigns its case before the analyst closes it.
+
+**Refusal shape.** A refusal the caller is entitled to see
+is an `AccessDeniedError`: HTTP 403 with a coded reason —
+`role_not_permitted`, `not_assignee`, `readonly_role` — and
+the family it names. A caller with *no* read right on a case
+instead raises the case-not-found error: the 404 body names
+no id, so a hidden case and a nonexistent case answer
+byte-for-byte alike, and existence is not leaked. The same
+rule covers customers (a profile follows its underlying
+cases; a caller who can read none of them gets the unknown-
+customer shape). Every refusal — seen or hidden — is first
+recorded as an `access_denied` audit event (who, which case
+or customer, which family, which coded reason, which action,
+the policy version); `GET /access/denials` lists them for
+the officer, the auditor, and the system. A read of a case
+that does not exist records nothing: there is nothing to
+protect, and it refuses nobody.
+
+**The read-only role.** `auditor_readonly` reads the whole
+book, custody families included, and writes nothing: every
+write check refuses it with `readonly_role` *before* the
+case's gates run — including gate actions its identity would
+otherwise satisfy. Access control is additive everywhere:
+no gate check was removed or weakened.
+
+**Custody after sealing.** When a case stands sealed, the
+evidence, narratives, and records families move into
+custody: L1 and L2 callers lose them (the seal view itself
+stays readable), while the officer, the auditor, and the
+system keep them. Export packages are narrower still: the
+`export` family belongs to `bsa_officer` alone — the auditor
+verifies packages offline through the open verify route.
+
+**Derivations run as the system.** Clock refreshes, SAR
+re-verification, and CLI report runs with no named caller
+resolve to the system scope explicitly, stated in the code —
+never by impersonating an analyst. A derivation trigger
+*with* an asserted identity is checked as that identity, so
+an auditor still cannot start one.
+
+**Enforcement points.** The API resolves the caller per
+route and checks before the handler's service call; list
+routes (cases, queues, the clock board) filter to the
+caller's scope so unreadable cases simply do not appear. The
+CLI takes `--caller` / `--caller-role` and runs the same
+checks through the same module — including reports, export,
+and assignment; there is no CLI path around the policy. The
+console's single fetch helper attaches the identity headers,
+so its queue is the signed-in analyst's book, and report
+views answer honestly when the role holds no reports family.
+Hand-built service stacks (single-service unit fixtures)
+carry no access service and keep their old shape; production
+wiring always builds it.
+
+**Grading.** Scenario 21 of the eval gate: every case family
+probed cross-assignee (leaks 0), refusal shapes compared
+byte-for-byte with the nonexistent-case and unknown-customer
+shapes (existence leaks 0), read-only writes at three doors
+(accepted 0), eleven family-door probes (bypasses 0, exports
+by a non-officer 0), CLI probes against a real CLI deployment
+database (bypasses 0), and a reconciliation of every refusal
+the probes earned against the denial record (unrecorded 0) —
+plus the positive paths: the assignee works their case, book
+roles read across, assignment and reassignment recorded and
+immediately effective, reporting under officer and auditor
+identities.
+
 ## Round map (20)
 
 R1 core: case model, state machine, ports, intake, evidence store
