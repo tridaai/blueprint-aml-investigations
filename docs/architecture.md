@@ -1048,6 +1048,76 @@ counters: queue mismatches, workspace gaps, console-only
 write paths, unescaped render paths, and console positive
 paths failed — all zero.
 
+## The trap suite (R15) — eval depth as adversarial grading
+
+R15 adds no surface; it attacks the surfaces R1–R14 built.
+The suite lives in `tests/test_traps_r15.py` and as eval
+Scenario 18, each trap graded with hand-computed expectations
+— zero-tolerance where the behaviour is a law, graded-exact
+where it is a boundary:
+
+- **Namesakes.** The grading matrix is symmetric across
+  screening and media: name + contradicting DOB clears with
+  the reason recorded; name + matching DOB corroborates even
+  when the identifier merely differs (a differing identifier
+  is recorded, never treated as proof of a different person);
+  an identifier match prevails over a DOB contradiction, with
+  the contradiction standing on the record; middle-name and
+  alias variants match by the stated token rules at potential
+  strength. The stale-list trap: a subject whose entry exists
+  only in list v2 leaves the v1-screened case flagged, with
+  no hit silently added or cleared, until a re-screen.
+- **Threshold edges.** Each typology rule is graded just
+  under and exactly at its boundary (structuring band top
+  and bottom, velocity multiple, dormancy gap, round-amount
+  share, in-out pass-through), figures asserted exactly.
+- **Clocks.** Deadline arithmetic across leap and plain
+  years; identification flipping the operative deadline (and
+  a cleared namesake hit identifying nobody); a late no-file
+  graded on both of its facts — documented, and late on the
+  clock's face; a continuing clock anchored on the actual
+  determination date of a prior filing that was itself late.
+- **Gates.** Dual control is graded against respelt identity
+  strings; a citation pairing the current record id with a
+  superseded version number is refused like any stale
+  citation; a seal is attempted over a chain with a gap
+  introduced by direct store manipulation and refused at
+  seal time, because the seal re-verifies before certifying.
+- **Injection, second family.** The memo-split trap states
+  the scanner's boundary honestly: matching is field-scoped,
+  two fragments that are harmless per field are not joined —
+  and the pair still changes no record, graded byte-exact
+  against a clean twin. Counterparty-carried and
+  headline-carried payloads grade the fencing and quarantine
+  of the two fields R10's prose scenarios did not ride.
+- **Data.** Re-delivery is graded in all three forms:
+  identical (idempotent), overlapping-identical (dedupe,
+  growth lands), and altered (refused — see below).
+
+Two traps found genuine defects; both were fixed in the
+owning module with the trap kept as the regression:
+
+1. **Dual control compared raw strings.** The confirmation
+   and approval gates compared person ids exactly, so a
+   dispositioner could confirm their own closure — or a
+   drafter approve their own narrative — by re-casing or
+   re-spacing their id. Person ids now compare in canonical
+   form (`canonical_person_id` in `dispositions.py`:
+   whitespace collapsed, case-folded) at both gates and at
+   the system-actor check; ids are still recorded exactly as
+   presented. Dual control binds persons, not spellings.
+2. **Ingestion could orphan a batch.** `ingest_transactions`
+   wrote the batch record and its evidence item before the
+   transaction rows, so a re-delivery re-using a stored id
+   with altered content crashed mid-write, leaving an orphan
+   batch that a retry returned as if ingested — the
+   alteration silently swallowed. The identity check now runs
+   before any write: a stored id arriving with different
+   content refuses the whole delivery
+   (`TransactionConflictError`); byte-identical records in a
+   later batch are stored once, which is what lets a
+   full-history feed grow a case's stream lawfully.
+
 ## Stores and migrations
 
 The `CaseStore` port has one SQL implementation used over SQLite
@@ -1170,7 +1240,8 @@ clocks + escalation · R9 continuing-activity reviews · R10 injection
 defences + quarantine · R11 KYC profile assembly + counterparty views
 · R12 adverse-media port + similarity · R13 model gateway profiles +
 cost ledger · R14 analyst console (static UI) · R15 eval depth:
-namesake/stale-list/threshold traps · R16 Postgres profile + prod
+the trap suite (namesakes, thresholds, clocks, gates, injection
+II, data) · R16 Postgres profile + prod
 smoke · R17 reporting: queue ageing, clock board, rubber-stamp
 metrics · R18 access control: role-scoped case access, retrieval
 ACLs · R19 red team: narrative-fact transposition, citation-to-passage

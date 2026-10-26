@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R14 of 20)
+## What is built at this round (R15 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -373,11 +373,54 @@ docker compose up --build
   the app's route table), and it renders everything as text:
   the file holds no markup sink, so a memo carrying a script
   is displayed as the data it is, never executed.
+- **Trap suite (R15).** Eval depth as adversarial fixtures
+  with hand-computed expectations, graded in the test suite
+  and as eval counters (scenario 18, every failure counter
+  zero-tolerance). *Namesakes*: same name and city with a
+  contradicting date of birth clears with the reason recorded;
+  the same name and DOB with a merely different identifier
+  stays strong and open — in screening and in media scoring
+  alike; middle-name and alias variants match by the stated
+  rules; an entry that exists only in list v2 flags the
+  v1-screened case `STALE_SCREENING` and surfaces only on a
+  deliberate re-screen. *Threshold edges*: every typology
+  boundary graded on both sides — 9,999.99 is structuring
+  material and 10,000.00 is not, velocity 4.9× is quiet and
+  5.0× fires, a 179-day dormancy is quiet and 180 fires,
+  round-amount share just under half is quiet and exactly
+  half fires, 89% pass-through is quiet and 90% fires.
+  *Clocks*: leap-day and plain-year deadline arithmetic, a
+  strong hit flipping the operative deadline while a cleared
+  namesake identifies nobody, a no-file decision recorded
+  after the deadline standing documented *and* visibly late
+  on the clock's face, a continuing clock anchored on a prior
+  determination that was itself late. *Gates*: a disposition
+  citing the current record id with a superseded version is
+  refused; a seal attempted over a chain with a gap introduced
+  by direct store manipulation is refused at seal time.
+  *Injection, second family*: an instruction split across two
+  memos (each half scans clean alone — the scanner is
+  field-scoped, a boundary this round states rather than
+  hides) changes nothing; a payload in a counterparty name is
+  fenced in the profile view and in the console's API data;
+  a payload in a media headline is quarantined and never
+  composed. *Data*: an alert payload name that disagrees with
+  the profile's name stands as a conflict with both sources.
+  Two traps found genuine defects, both fixed with the trap
+  kept as the regression: dual control compared person ids as
+  raw strings, so the dispositioner could confirm their own
+  closure — or the drafter approve their own narrative — by
+  re-casing their id (identity now compares in canonical form
+  at both gates); and transaction ingestion wrote its batch
+  record before storing transactions, so a re-delivered batch
+  with one amount altered orphaned a batch a retry silently
+  honoured (a stored id re-used with different content is now
+  refused whole, before anything is written, and identical
+  re-deliveries dedupe).
 
-The rest — eval depth, the Postgres production profile,
-reporting, access control, the red team, and release
-hardening — lands in R15–R20 per the round map in
-`docs/architecture.md`.
+The rest — the Postgres production profile, reporting,
+access control, the red team, and release hardening — lands
+in R16–R20 per the round map in `docs/architecture.md`.
 
 ## Configuration
 
@@ -405,7 +448,7 @@ hardening — lands in R15–R20 per the round map in
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, KYC profiles, counterparties, adverse media, model gateway, analyst console, API, SQL store
+make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, KYC profiles, counterparties, adverse media, model gateway, analyst console, the trap suite, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 
