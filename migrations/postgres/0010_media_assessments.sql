@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS media_assessments (
     article_id    TEXT NOT NULL,
     band          TEXT NOT NULL,
     assessed_at   TIMESTAMPTZ NOT NULL,
-    payload       JSONB NOT NULL
+    payload       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_media_assessments_case
     ON media_assessments (case_id);

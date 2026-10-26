@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS model_call_ledger (
     model               TEXT NOT NULL,
     price_table_version TEXT NOT NULL,
     called_at           TIMESTAMPTZ NOT NULL,
-    payload             JSONB NOT NULL
+    payload             TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_model_call_ledger_case
     ON model_call_ledger (case_id);
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS model_budget_events (
     case_id     TEXT NOT NULL,
     profile_id  TEXT NOT NULL,
     recorded_at TIMESTAMPTZ NOT NULL,
-    payload     JSONB NOT NULL
+    payload     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_model_budget_events_case
     ON model_budget_events (case_id);

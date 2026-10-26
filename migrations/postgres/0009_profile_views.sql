@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS profile_views (
     customer_id TEXT NOT NULL,
     version     INTEGER NOT NULL,
     assembled_at TIMESTAMPTZ NOT NULL,
-    payload     JSONB NOT NULL
+    payload     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_profile_views_customer
     ON profile_views (customer_id);

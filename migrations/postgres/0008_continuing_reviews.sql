@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS continuing_reviews (
     customer_id TEXT NOT NULL,
     cycle       INTEGER NOT NULL,
     opened_at   TIMESTAMPTZ NOT NULL,
-    payload     JSONB NOT NULL
+    payload     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_continuing_reviews_case
     ON continuing_reviews (case_id);
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS continuing_review_dispositions (
     case_id     TEXT NOT NULL,
     customer_id TEXT NOT NULL,
     decided_at  TIMESTAMPTZ NOT NULL,
-    payload     JSONB NOT NULL
+    payload     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_continuing_review_dispositions_case
     ON continuing_review_dispositions (case_id);
