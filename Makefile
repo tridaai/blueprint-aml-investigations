@@ -6,11 +6,13 @@
 #   make test        pytest
 #   make evals       eval gate, offline (in-memory stack)
 #   make serve       the API on http://localhost:8000
+#   make prod-smoke  the real app on Postgres, one case end to end
+#                    (requires DATABASE_URL; see scripts/prod_smoke.py)
 #
 # No uv? python3 -m venv .venv && source .venv/bin/activate, then:
 #   make install-pip
 
-.PHONY: install install-pip demo test evals serve
+.PHONY: install install-pip demo test evals serve prod-smoke
 
 install:
 	uv sync --extra dev
@@ -34,3 +36,6 @@ evals:
 
 serve:
 	uv run uvicorn aml_investigations.api:app --port 8000
+
+prod-smoke:
+	uv run python scripts/prod_smoke.py
