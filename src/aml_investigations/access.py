@@ -89,7 +89,7 @@ from .errors import (
     CaseNotFoundError,
     CustomerNotFoundError,
 )
-from .evidence import EvidenceService, case_is_sealed
+from .evidence import EvidenceService, case_is_sealed, ensure_case_mutable
 from .models import AuditEvent, Case
 from .ports import CaseStore, SealStore
 
@@ -745,6 +745,13 @@ class AccessService:
         case = self._store.get_case(case_id)
         if case is None:
             raise CaseNotFoundError(case_id)
+        # R19: the sealed check runs BEFORE the act writes
+        # anything. Until this fix, the assignee was written to
+        # the case record first and the evidence funnel's sealed
+        # backstop refused the chain item afterwards — the act
+        # raised, but the assignment had already silently taken
+        # effect, with no chain item and no audit event.
+        ensure_case_mutable(self._seal_store, case_id)
         if actor.role == ROLE_AUDITOR:
             self._record_denial(
                 actor,
