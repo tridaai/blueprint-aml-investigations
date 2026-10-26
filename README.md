@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R19 of 20)
+## What is built
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -574,8 +574,22 @@ docker compose up --build
   gate on any stack — the control still isolates exactly the
   mask's own work.
 
-The rest — release hardening — lands in R20 per the round
-map in `docs/architecture.md`.
+- **Release hardening (R20)** — the freeze, and the last
+  round. No new features: the entire gate set re-run on the
+  finished tree — the full test suite on the default profile
+  (452 passed, 2 skipped) and on PostgreSQL 16 (454 passed,
+  parity gap 0 over the 452 shared tests), the eval gate on
+  both profiles with every scenario reporting, including the
+  R19 red team as Scenario 22, the production smoke walking a
+  case over HTTP to a sealed, offline-verified export (20/20
+  steps), and the demo running exactly as written above. The
+  README and architecture docs were audited claim by claim
+  against the code and corrected where they had drifted (a
+  forward-looking LangGraph-checkpointing note that never
+  landed is now the plain statement that the graphs hold no
+  durable state of their own; the configuration table below
+  had missed a row). The package is versioned **1.0.0**, and
+  the twenty rounds are gathered in `CHANGELOG.md`.
 
 ## Configuration
 
@@ -587,6 +601,7 @@ map in `docs/architecture.md`.
 | `S3_BUCKET` | `aml-evidence` | Evidence bucket |
 | `OBJECT_STORE_DIR` | `./data/evidence-objects` | Filesystem object store when no S3 endpoint is set |
 | `SEED_ALERTS_PATH` | `./data/seed_alerts.json` | Reference alert feed |
+| `SCREENING_LISTS_PATH` | `./data/screening_lists.json` | Reference screening list snapshots (stand-ins for the licensed feeds) |
 | `TRANSACTION_STREAMS_PATH` | `./data/transaction_streams.json` | Reference transaction feed (full-history streams) |
 | `TYPOLOGY_RULES_PATH` | `./data/typology_rules.json` | Reference typology rule-pack feed |
 | `ADVERSE_MEDIA_PATH` | `./data/adverse_media.json` | Reference adverse-media corpus (stand-in for a licensed news database) |
@@ -706,7 +721,7 @@ Postgres and default profiles (0).
   reference data with a stated basis and as-of date, maintained
   by the deployment.
 - No SAR is ever actually filed — the blueprint ends at an approved,
-  sealed case file. As of R10 the line stops exactly there: a
+  sealed case file. The line stops exactly there: a
   narrative approved under dual control, its case file sealed and
   exportable, the export verifiable offline — every case carrying a
   regulatory clock that says, in code, whether the file is on time,
@@ -718,7 +733,11 @@ Postgres and default profiles (0).
   as an instruction quarantined on the chain and fenced out of
   every composer and verifier that touches it — the whole file
   readable in the analyst console (R14), which renders it as
-  text and acts on it only through the same gated routes.
+  text and acts on it only through the same gated routes —
+  management reporting derived from the same artefacts (R17),
+  every read behind role-scoped access control (R18), and the
+  guarantees themselves red-teamed (R19) and frozen under a
+  full-gate release pass (R20).
 - The Postgres production profile is verified (R16, and
   re-verified every round since): the full test suite passes
   unchanged on PostgreSQL 16 (452 tests as of R19,

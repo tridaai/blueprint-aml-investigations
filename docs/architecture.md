@@ -29,9 +29,9 @@ R2 added screening on top of it: version-pinned list snapshots,
 delta re-screening, and the sanctions must-escalate guard. R3 added
 the typology engine: evidence-backed transaction ingestion and five
 deterministic money-computation checks under versioned rule packs.
-Rounds R4–R20 fill in the remaining investigation stages behind the
-same case and evidence model; the round map is at the bottom of
-this document.
+Rounds R4–R19 filled in the remaining investigation stages behind
+the same case and evidence model, and R20 froze the result; the
+round map is at the bottom of this document.
 
 ## Case state machine (LangGraph)
 
@@ -1155,7 +1155,12 @@ deterministic code over stored records, so no vector store is
 needed). Migration 0011 added `model_call_ledger` and
 `model_budget_events` (the model gateway's append-only cost
 ledger and its budget-refusal records; see the gateway section
-above). Later rounds add LangGraph checkpointing on Postgres.
+above). Neither graph uses a LangGraph checkpointer: the state
+machine applies one transition per invocation and the
+investigation graph one pass per run, and the case store
+persists every step's result — resumption reads the case's
+current state back from the store, so the graphs hold no
+durable state of their own.
 
 ## Ports
 
