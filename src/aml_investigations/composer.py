@@ -74,6 +74,309 @@ def ungrounded_figures(statement: str, allowed: set[Decimal]) -> list[str]:
     return sorted(format(d, "f") for d in stray)
 
 
+# ---------------------------------------------------------------------------
+# Per-element grounding (R19): the red team's strengthening.
+#
+# Until R19 the verifiers grounded a statement's figures in the
+# UNION of everything it cited: a token found anywhere in any cited
+# element grounded the claim, wherever the statement put it. That
+# let a drafting path transpose facts *between* cited elements —
+# one transaction's amount wearing another's date, one
+# counterparty's name riding on another's transaction, a component
+# amount restated as the total — and still verify, because every
+# token existed somewhere in the union. The checks below bind each
+# claim to its own element:
+#
+# - a stated figure grounds only in an element that carries it
+#   under the figure's own key (a ``total_amount`` must be found
+#   as a ``total_amount`` — in a computed finding's figures, a
+#   field citation's tail, a record's field — never as some other
+#   element's ``amount``);
+# - a stated value must appear inside ONE cited element, never
+#   assembled across several;
+# - when a statement cites two or more transactions, its figures,
+#   dates and values may not be drawn exclusively from different
+#   ones — that is a transposition, even when every token is real;
+# - a statement using total language ("totalling", "in total",
+#   "aggregate") must present a figure its citations actually
+#   carry as a total.
+#
+# Legitimate composition already satisfies all four: composers
+# read each figure from the element that carries it, under its
+# key, and totals always come from computed findings (Law 4 —
+# the drafting path never sums transactions itself).
+# ---------------------------------------------------------------------------
+
+_ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+_LONG_DATE_RE = re.compile(
+    r"\b(?:January|February|March|April|May|June|July|August|"
+    r"September|October|November|December)\s+\d{1,2},\s+\d{4}\b"
+)
+
+_TOTAL_TRIGGER_RE = re.compile(
+    r"\b(total|totalling|totaling|totals|aggregate|aggregated|combined)\b",
+    re.IGNORECASE,
+)
+
+
+def dates_in(text: str) -> list[str]:
+    """Every date a statement text states, in the two shapes the
+    drafters write: ISO (``2026-03-04``) and long form
+    (``March 4, 2026``). Order of appearance, duplicates kept out."""
+    found: list[tuple[int, str]] = []
+    for pattern in (_ISO_DATE_RE, _LONG_DATE_RE):
+        for match in pattern.finditer(text):
+            found.append((match.start(), match.group(0)))
+    return [value for _pos, value in sorted(found)]
+
+
+@dataclass
+class CitedElement:
+    """One resolved citation, in the form the grounding checks
+    consume: the citation's element ref, the resolved element
+    (fenced, where the caller fences untrusted text), its JSON
+    text, and its groundable (span-masked) numeric tokens."""
+
+    ref: str
+    resolved: object
+    blob: str
+    tokens: set[Decimal] = field(default_factory=set)
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        return Decimal(str(value))
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            return Decimal(text)
+        except Exception:
+            return None
+    return None
+
+
+def _value_matches(carried: object, stated: object) -> bool:
+    """A carried element value against a stated figure/value:
+    numeric equality when both sides parse as numbers (``28800``
+    the int, ``"28800"`` the string and ``"28800.00"`` are one
+    figure), else an exact text comparison."""
+    left = _decimal_or_none(carried)
+    right = _decimal_or_none(stated)
+    if left is not None and right is not None:
+        return left == right
+    return str(carried).strip().casefold() == str(stated).strip().casefold()
+
+
+def _key_values(node: object, key: str) -> list[object]:
+    """Every value carried under ``key`` anywhere inside a
+    resolved element — its top level, a nested ``figures`` dict,
+    a list member. A figure grounds under its key wherever in
+    its own element that key honestly sits."""
+    found: list[object] = []
+    if isinstance(node, dict):
+        if key in node:
+            found.append(node[key])
+        for child in node.values():
+            found.extend(_key_values(child, key))
+    elif isinstance(node, list):
+        for child in node:
+            found.extend(_key_values(child, key))
+    return found
+
+
+def _figure_grounding_refs(
+    key: str, value: str, elements: list[CitedElement]
+) -> set[str]:
+    """The refs of the elements that carry ``value`` under
+    ``key`` — a figure's grounding places, for the checks that
+    care *where* a figure grounded."""
+    refs: set[str] = set()
+    for element in elements:
+        if element.ref.startswith("field:"):
+            tail = element.ref[len("field:"):].rsplit(".", 1)[-1]
+            if tail == key and _value_matches(element.resolved, value):
+                refs.add(element.ref)
+        for carried in _key_values(element.resolved, key):
+            if _value_matches(carried, value):
+                refs.add(element.ref)
+        if isinstance(element.resolved, (str, int, float)) and (
+            element.ref.rsplit(":", 1)[-1] == key
+            and _value_matches(element.resolved, value)
+        ):
+            refs.add(element.ref)
+    return refs
+
+
+def _figure_grounded(
+    key: str, value: str, elements: list[CitedElement]
+) -> bool:
+    return bool(_figure_grounding_refs(key, value, elements))
+
+
+def _total_grounded(number: str, elements: list[CitedElement]) -> bool:
+    """Is ``number`` carried as a total by any cited element —
+    under any key that names a total (``total_amount``,
+    ``in_total`` …), or by a field citation to such a field?"""
+    target = _decimal_or_none(number)
+    if target is None:
+        return False
+    for element in elements:
+        if element.ref.startswith("field:"):
+            tail = element.ref[len("field:"):].rsplit(".", 1)[-1]
+            if "total" in tail.casefold() and _value_matches(
+                element.resolved, number
+            ):
+                return True
+        stack = [element.resolved]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                for key, child in node.items():
+                    if "total" in key.casefold():
+                        carried = _decimal_or_none(child)
+                        if carried is not None and carried == target:
+                            return True
+                    stack.append(child)
+            elif isinstance(node, list):
+                stack.extend(node)
+    return False
+
+
+def _transposition_problems(
+    text: str,
+    values: dict[str, str],
+    elements: list[CitedElement],
+) -> list[str]:
+    txn = [e for e in elements if e.ref.startswith("transaction:")]
+    if len({e.ref for e in txn}) < 2:
+        return []
+    specifics: list[tuple[str, object]] = []
+    for token in numeric_tokens(text):
+        specifics.append(
+            (f"figure {format(token, 'f')}", lambda e, t=token: t in e.tokens)
+        )
+    for day in dates_in(text):
+        specifics.append((f"date {day}", lambda e, d=day: d in e.blob))
+    for value in values.values():
+        if value:
+            specifics.append(
+                (f"value {value!r}", lambda e, v=value: v in e.blob)
+            )
+    if not specifics:
+        return []
+    # Escape: one cited element — typically the computed finding
+    # the statement restates — carries every specific itself, so
+    # nothing was drawn from separate transactions at all.
+    if any(
+        all(fn(element) for _label, fn in specifics) for element in elements
+    ):
+        return []
+    sources: dict[str, str] = {}
+    for label, fn in specifics:
+        refs = {e.ref for e in txn if fn(e)}
+        if len(refs) == 1:
+            sources[label] = next(iter(refs))
+    if len(set(sources.values())) < 2:
+        return []
+    drawn = ", ".join(
+        f"{label} from {ref}" for label, ref in sorted(sources.items())
+    )
+    return [
+        "statement transposes facts between cited transactions: "
+        f"{drawn}; a figure, date or value must come from the "
+        "transaction it describes, not from another transaction "
+        "the statement also cites"
+    ]
+
+
+def _total_problems(
+    text: str,
+    figures: dict[str, str],
+    elements: list[CitedElement],
+) -> list[str]:
+    match = _TOTAL_TRIGGER_RE.search(text)
+    if match is None:
+        return []
+    numbers = _NUMBER_RE.findall(text[match.start():])
+    if not numbers:
+        return []
+    if any(_total_grounded(number, elements) for number in numbers):
+        return []
+    # Excuse: the "total" is a named, non-transaction figure the
+    # statement itself carries — a profile's expected monthly
+    # amount "totalling 30000" is a field the statement cites
+    # under its own key, not a sum restated from components. The
+    # excuse never applies to a figure grounded only in a
+    # transaction element: that is exactly the subset restatement
+    # this check exists to refuse.
+    for key, value in figures.items():
+        if not any(
+            _decimal_or_none(number) == _decimal_or_none(value)
+            for number in numbers
+        ):
+            continue
+        refs = _figure_grounding_refs(key, value, elements)
+        if any(not ref.startswith("transaction:") for ref in refs):
+            return []
+    return [
+        f"statement uses total language ({match.group(0)!r}) but "
+        "none of the figures that follow it ("
+        + ", ".join(numbers)
+        + ") is carried as a total by any cited element; a total "
+        "traces to a computed finding, never to a component amount"
+    ]
+
+
+def grounding_problems(
+    *,
+    text: str,
+    figures: dict[str, str],
+    values: dict[str, str],
+    elements: list[CitedElement],
+) -> list[str]:
+    """The R19 per-element grounding checks over one statement
+    (or finding) and the elements it cites. Complements — never
+    replaces — the callers' token checks: those ask whether a
+    figure appears in the cited records at all; these ask
+    whether it appears *in its own element, under its own key,
+    alongside the facts it is stated with*."""
+    problems: list[str] = []
+    for key, value in figures.items():
+        if not _figure_grounded(key, value, elements):
+            problems.append(
+                f"figure {key}={value!r} does not appear in the "
+                "cited records under that name; a figure grounds "
+                "only in an element that carries it under its "
+                "own key"
+            )
+    if values and elements:
+        combined = "\n".join(e.blob for e in elements)
+        for name, value in values.items():
+            if not value or value not in combined:
+                continue  # the caller's union check names it
+            if any(value in e.blob for e in elements):
+                continue
+            tokens = numeric_tokens(value)
+            if (
+                tokens
+                and not any(ch.isalpha() for ch in value)
+                and any(tokens <= e.tokens for e in elements)
+            ):
+                continue
+            problems.append(
+                f"value {name}={value!r} does not appear in any "
+                "single cited element; a value may not be "
+                "assembled across elements"
+            )
+    problems.extend(_transposition_problems(text, values, elements))
+    problems.extend(_total_problems(text, figures, elements))
+    return problems
+
+
 @dataclass
 class StatementDraft:
     """One statement to compose: a template, the exact values code

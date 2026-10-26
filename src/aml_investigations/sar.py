@@ -65,9 +65,11 @@ from decimal import Decimal
 
 from .composer import (
     DEFAULT_PROFILE,
+    CitedElement,
     NarrativeComposer,
     StatementDraft,
     get_composer,
+    grounding_problems,
     numeric_tokens,
     tokens_of,
     ungrounded_figures,
@@ -1151,6 +1153,7 @@ class SarNarrativeService:
             return problems
         resolved_elements: list[object] = []
         cited_tokens: set[Decimal] = set()
+        elements: list[CitedElement] = []
         for citation in statement.citations:
             try:
                 resolved = self._resolver.resolve(citation, narrative.case_id)
@@ -1167,6 +1170,22 @@ class SarNarrativeService:
                 resolved_elements[-1] = self._quarantine.fenced_value(
                     narrative.case_id, citation, resolved
                 )
+            # R19: the same resolution, kept per element — the
+            # grounding checks below bind every figure, value,
+            # date and total to its OWN cited element, not to the
+            # union of everything the statement cites.
+            elements.append(
+                CitedElement(
+                    ref=citation.element,
+                    resolved=resolved_elements[-1],
+                    blob=json.dumps(
+                        resolved_elements[-1], sort_keys=True, default=str
+                    ),
+                    tokens=self._grounded(
+                        narrative.case_id, citation, resolved
+                    ),
+                )
+            )
         for finding_id in statement.finding_ids:
             if finding_id not in finding_ids:
                 problems.append(
@@ -1207,6 +1226,17 @@ class SarNarrativeService:
                 "cited records; the claim does not map to a cited "
                 "evidence element"
             )
+        # R19: per-element grounding — figures under their own
+        # key, values inside one element, no transposition
+        # between cited transactions, totals carried as totals.
+        problems.extend(
+            grounding_problems(
+                text=statement.text,
+                figures=statement.figures,
+                values=statement.values,
+                elements=elements,
+            )
+        )
         return problems
 
     def _verify_completeness(

@@ -46,9 +46,11 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from .composer import (
+    CitedElement,
     NarrativeComposer,
     StatementDraft,
     get_composer,
+    grounding_problems,
     numeric_tokens,
     tokens_of,
     ungrounded_figures,
@@ -788,6 +790,7 @@ class InvestigationService:
                 problems.append(f"finding {finding.finding_id} has no citations")
                 continue
             cited_tokens: set[Decimal] = set()
+            elements: list[CitedElement] = []
             for citation in finding.citations:
                 try:
                     resolved = self._resolver.resolve(citation, record.case_id)
@@ -797,19 +800,35 @@ class InvestigationService:
                     )
                     continue
                 if self._quarantine is not None:
-                    cited_tokens |= self._quarantine.grounding_tokens(
+                    element_tokens = self._quarantine.grounding_tokens(
                         record.case_id, citation, resolved
                     )
                 else:
-                    cited_tokens |= tokens_of(resolved)
-            if finding.origin in (
+                    element_tokens = tokens_of(resolved)
+                cited_tokens |= element_tokens
+                # R19: the resolution, kept per element — the
+                # grounding checks below bind every figure and
+                # date to its OWN cited element, not to the union
+                # of everything the finding cites.
+                elements.append(
+                    CitedElement(
+                        ref=citation.element,
+                        resolved=resolved,
+                        blob=json.dumps(
+                            resolved, sort_keys=True, default=str
+                        ),
+                        tokens=element_tokens,
+                    )
+                )
+            gated_origin = finding.origin in (
                 "typology",
                 "screening",
                 "alert",
                 "profile",
                 "prior_case",
                 "media",
-            ):
+            )
+            if gated_origin:
                 for name, value in finding.figures.items():
                     if not numeric_tokens(value) <= cited_tokens:
                         problems.append(
@@ -827,6 +846,19 @@ class InvestigationService:
                     f"figure(s) not grounded in its citations or "
                     f"figures: {', '.join(stray)}"
                 )
+            if gated_origin:
+                # R19: per-element grounding — figures under
+                # their own key, no transposition between cited
+                # transactions, totals carried as totals.
+                for problem in grounding_problems(
+                    text=finding.statement,
+                    figures=finding.figures,
+                    values={},
+                    elements=elements,
+                ):
+                    problems.append(
+                        f"finding {finding.finding_id}: {problem}"
+                    )
         hypothesis = record.hypothesis
         for fid in hypothesis.supporting_finding_ids:
             target = findings.get(fid)

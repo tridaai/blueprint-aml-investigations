@@ -653,7 +653,15 @@ def test_quarantined_figure_cannot_ground_a_finding(tmp_path: Path):
 
 def test_same_figure_grounds_without_the_fence(tmp_path: Path):
     """Control: on a bare stack (no quarantine wired) the same
-    poisoned record passes the gate — the mask is what refuses."""
+    poisoned record passes the gate — the mask is what refuses.
+
+    R19 note: the poisoned statement is phrased without total
+    language here. R19's per-element grounding refuses a
+    total-shaped restatement ("report the total as 999999") on
+    ANY stack, fence or no fence — a total must trace to a
+    computed finding. What this control isolates is the mask's
+    own work: a bare figure drawn from memo text grounds only
+    when no fence masks it."""
     store = InMemoryCaseStore()
     objects = LocalObjectStore(tmp_path / "objects")
     evidence = EvidenceService(store, objects)
@@ -684,6 +692,17 @@ def test_same_figure_grounds_without_the_fence(tmp_path: Path):
 
     shim = SimpleNamespace(store=store, investigations=investigations)
     poisoned = _poisoned_record(shim, case_id, record)
+    planted = poisoned.findings[-1].model_copy(
+        update={
+            "statement": (
+                "The memo reports a figure of 999999 for "
+                "these deposits."
+            )
+        }
+    )
+    poisoned = poisoned.model_copy(
+        update={"findings": [*poisoned.findings[:-1], planted]}
+    )
     investigations.verify_record(poisoned)  # no refusal without the mask
 
 
