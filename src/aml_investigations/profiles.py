@@ -164,7 +164,7 @@ class ProfileService:
         cases = self._customer_cases(customer_id)
         if not cases:
             raise CustomerNotFoundError(
-                f"no cases on record for customer {customer_id}"
+                "no cases on record for the customer"
             )
         facts, alias_facts = self._identity_facts(cases)
         conflicts = self._identity_conflicts(facts)
@@ -251,7 +251,7 @@ class ProfileService:
     def view_history(self, customer_id: str) -> list[ProfileView]:
         if not self._customer_cases(customer_id):
             raise CustomerNotFoundError(
-                f"no cases on record for customer {customer_id}"
+                "no cases on record for the customer"
             )
         return self._profiles.list_profile_views(customer_id)
 
@@ -654,7 +654,7 @@ class ProfileService:
         customer's own totals and the full customer link set."""
         if not self._customer_cases(customer_id):
             raise CustomerNotFoundError(
-                f"no cases on record for customer {customer_id}"
+                "no cases on record for the customer"
             )
         by_name = self._aggregate()
         views: list[CounterpartyView] = []

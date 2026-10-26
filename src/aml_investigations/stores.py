@@ -134,6 +134,9 @@ class InMemoryCaseStore:
     def list_audit(self, case_id: str) -> list[AuditEvent]:
         return [e.model_copy(deep=True) for e in self._audit if e.case_id == case_id]
 
+    def list_all_audit(self) -> list[AuditEvent]:
+        return [e.model_copy(deep=True) for e in self._audit]
+
     # --- screening (Law 3): snapshots, runs, hits --------------------
     def save_snapshot(self, snapshot: ListSnapshot) -> ListSnapshot:
         with self._lock:
@@ -790,6 +793,13 @@ class SqlCaseStore:
         rows = self._fetchall(
             "SELECT payload FROM audit_events WHERE case_id = ? ORDER BY ts ASC, event_id ASC",
             (case_id,),
+        )
+        return [AuditEvent.model_validate_json(r["payload"]) for r in rows]
+
+    def list_all_audit(self) -> list[AuditEvent]:
+        rows = self._fetchall(
+            "SELECT payload FROM audit_events ORDER BY ts ASC, event_id ASC",
+            (),
         )
         return [AuditEvent.model_validate_json(r["payload"]) for r in rows]
 

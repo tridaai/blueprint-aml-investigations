@@ -73,6 +73,8 @@ class CaseStore(Protocol):
 
     def list_audit(self, case_id: str) -> list[AuditEvent]: ...
 
+    def list_all_audit(self) -> list[AuditEvent]: ...
+
 
 @runtime_checkable
 class ObjectStore(Protocol):

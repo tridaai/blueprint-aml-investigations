@@ -385,6 +385,39 @@ class UnknownModelProfileError(ModelGatewayError):
     profile for the one that was named."""
 
 
+class AccessDeniedError(AmlError):
+    """An access-control refusal (R18): the caller's identity does
+    not carry the right this door requires.
+
+    Carries a coded reason — ``role_not_permitted`` (the role's
+    policy grant does not include this family or door),
+    ``not_assignee`` (an L1 analyst acting on a case assigned to
+    another analyst), ``readonly_role`` (the auditor role attempted
+    a write — read-only is a hard property of the role, checked
+    before any gate logic) — and the artefact family the refusal
+    names. Every refusal is recorded as an access-denied audit
+    event before it is raised.
+
+    Case reads by a caller with no right on the case do NOT raise
+    this: they raise :class:`CaseNotFoundError`, so a case's
+    existence is never leaked by a distinguishable response. This
+    error is for refusals the caller is entitled to see — a family
+    their role excludes on a case they may otherwise know, a
+    portfolio door their role does not hold, a write they may not
+    make."""
+
+    def __init__(
+        self, code: str, family: str, message: str = ""
+    ) -> None:
+        self.code = code
+        self.family = family
+        super().__init__(
+            message
+            or f"access denied ({code}): family {family!r} is not "
+            "open to this caller"
+        )
+
+
 class ModelBudgetExceededError(ModelGatewayError):
     """A live-profile call was refused: the case's priced spend
     reached the deployment's per-case budget cap.

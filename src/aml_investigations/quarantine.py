@@ -109,6 +109,9 @@ SYSTEM_EVIDENCE_KINDS = frozenset(
         # R13: a model-budget refusal is a system-generated
         # gateway record, written by the gateway itself.
         "model_budget_refusal",
+        # R18: a case assignment is a system-generated access
+        # record, written by the access service itself.
+        "case_assignment",
         QUARANTINE_KIND,
         REVIEW_KIND,
     }
