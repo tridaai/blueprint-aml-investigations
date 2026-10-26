@@ -193,6 +193,26 @@ Usage:
                                     the operations section alone:
                                     typology, screening, quarantine,
                                     media, model spend
+    aml-agent assign <case_id> <assignee_id> --actor ID --role ROLE
+                                    assign a case to a named analyst
+                                    (R18): a recorded act on the
+                                    evidence chain; book roles assign
+                                    freely, an L1 analyst may only
+                                    claim an unassigned case
+    aml-agent denials               every recorded access denial
+                                    (R18) — officer / auditor / system
+    aml-agent access-policy         the versioned access policy
+                                    (R18) as data
+
+Identity (R18): every case-scoped command runs under a caller
+identity, exactly as the API does. Pass ``--caller ID
+--caller-role ROLE`` BEFORE the command to act as that person;
+commands whose actor is a named service (screen, run-typologies,
+draft-sar, …) default to that service identity, and gate
+commands use their --analyst/--confirmer/--approver/--officer.
+Report commands without an explicit caller run as the system
+derivation; with an analyst caller they refuse. There is no
+CLI path around the access policy.
 """
 
 from __future__ import annotations
@@ -201,12 +221,19 @@ import argparse
 import json
 import sys
 
+from .access import (
+    CallerIdentity,
+    access_policy_document,
+    identity_for_actor,
+)
 from .errors import AmlError
 from .wiring import build_services
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="aml-agent")
+    parser.add_argument("--caller", default=None)
+    parser.add_argument("--caller-role", default=None)
     sub = parser.add_subparsers(dest="command", required=True)
     p_intake = sub.add_parser("intake")
     p_intake.add_argument("alert_id")
@@ -390,17 +417,70 @@ def main(argv: list[str] | None = None) -> int:
     p_report_rubber.add_argument("--as-of", default=None)
     p_report_ops = sub.add_parser("report-ops")
     p_report_ops.add_argument("--as-of", default=None)
+    p_assign = sub.add_parser("assign")
+    p_assign.add_argument("case_id")
+    p_assign.add_argument("assignee_id")
+    p_assign.add_argument("--actor", required=True)
+    p_assign.add_argument("--role", required=True)
+    sub.add_parser("denials")
+    sub.add_parser("access-policy")
     args = parser.parse_args(argv)
 
     services = build_services()
+    access = services.access
+
+    # --- access control (R18): the CLI enforces through the ---
+    # --- same module as the API. No CLI path bypasses it. -----
+    def _identity(actor=None, role=None):
+        if args.caller is not None or args.caller_role is not None:
+            return identity_for_actor(
+                args.caller or "", args.caller_role or role
+            )
+        return identity_for_actor(actor, role)
+
+    def _read(case_id, family):
+        if access is not None:
+            access.check_read(_identity(), case_id, family)
+
+    def _write(case_id, family, actor=None, role=None, derivation=False):
+        if access is not None:
+            access.check_write(
+                _identity(actor, role),
+                case_id,
+                family,
+                derivation=derivation,
+            )
+
+    def _portfolio(family):
+        if access is not None:
+            access.check_portfolio(_identity(), family)
+
+    def _door(door, actor=None, role=None):
+        if access is not None:
+            identity = _identity(actor, role)
+            if identity is None:
+                identity = CallerIdentity(
+                    person_id="system", role="system"
+                )
+            access.check_door_write(identity, door)
+
+    def _visible_ids():
+        if access is None:
+            return None
+        return access.filter_case_ids(_identity(), None)
+
     try:
         if args.command == "intake":
+            _door("intake")
             case = services.intake.open_case(args.alert_id)
             print(json.dumps(case.model_dump(mode="json"), indent=2))
         elif args.command == "list":
             cases = services.store.list_cases(args.status)
+            if access is not None:
+                cases = access.filter_cases(_identity(), cases)
             print(json.dumps([c.model_dump(mode="json") for c in cases], indent=2))
         elif args.command == "show":
+            _read(args.case_id, "case")
             case = services.store.get_case(args.case_id)
             if case is None:
                 print(f"case not found: {args.case_id}", file=sys.stderr)
@@ -418,9 +498,11 @@ def main(argv: list[str] | None = None) -> int:
             }
             print(json.dumps(out, indent=2))
         elif args.command == "verify":
+            _read(args.case_id, "evidence")
             intact = services.evidence.verify_chain(args.case_id)
             print(json.dumps({"case_id": args.case_id, "chain_intact": intact}))
         elif args.command == "ingest-lists":
+            _door("reference_data")
             snapshots = services.screening.ingest_from_source(services.screening_feed)
             print(
                 json.dumps(
@@ -438,6 +520,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "screen":
+            _write(args.case_id, "screening", actor=args.actor)
             pins = {}
             if args.sanctions:
                 pins["sanctions"] = args.sanctions
@@ -463,6 +546,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "register-packs":
+            _door("reference_data")
             packs = services.typologies.register_from_source(services.rule_pack_feed)
             print(json.dumps([p.model_dump(mode="json") for p in packs], indent=2))
         elif args.command == "packs":
@@ -476,11 +560,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "ingest-transactions":
+            _write(args.case_id, "transactions", actor="core-banking-feed")
             batch = services.typologies.ingest_from_source(
                 args.case_id, services.transactions
             )
             print(json.dumps(batch.model_dump(mode="json"), indent=2))
         elif args.command == "run-typologies":
+            _write(args.case_id, "typologies", actor=args.actor)
             run = services.typologies.run_typologies(
                 args.case_id, args.pack, args.version, actor=args.actor
             )
@@ -499,6 +585,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "findings":
+            _read(args.case_id, "typologies")
             findings = services.typologies.list_findings(args.case_id)
             print(
                 json.dumps(
@@ -506,11 +593,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "investigate":
+            _write(args.case_id, "records", actor=args.actor)
             record = services.investigations.run_investigation(
                 args.case_id, actor=args.actor, profile=args.profile
             )
             print(json.dumps(record.model_dump(mode="json"), indent=2))
         elif args.command == "investigation":
+            _read(args.case_id, "records")
             if services.store.get_case(args.case_id) is None:
                 print(f"case not found: {args.case_id}", file=sys.stderr)
                 return 1
@@ -537,6 +626,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "disposition":
             from .models import DispositionOutcome
 
+            _write(
+                args.case_id, "dispositions",
+                actor=args.analyst, role=args.role,
+            )
             record = services.dispositions.record_disposition(
                 args.case_id,
                 analyst_id=args.analyst,
@@ -563,6 +656,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "confirm":
             from .models import ConfirmationOutcome
 
+            _write(
+                args.case_id, "dispositions",
+                actor=args.confirmer, role=args.role,
+            )
             confirmation = services.dispositions.confirm_disposition(
                 args.case_id,
                 confirmer_id=args.confirmer,
@@ -582,6 +679,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "dispositions":
+            _read(args.case_id, "dispositions")
             if services.store.get_case(args.case_id) is None:
                 print(f"case not found: {args.case_id}", file=sys.stderr)
                 return 1
@@ -604,12 +702,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "queue":
+            _portfolio(
+                "confirmation_queue"
+                if args.kind == "confirmations"
+                else "escalation_queue"
+            )
             if args.kind == "confirmations":
                 entries = services.dispositions.confirmation_queue()
             else:
                 entries = services.dispositions.escalation_queue()
             print(json.dumps(entries, indent=2))
         elif args.command == "draft-sar":
+            _write(args.case_id, "narratives", actor=args.actor)
             narrative, verification = services.sar.draft_narrative(
                 args.case_id, actor=args.actor, profile=args.profile
             )
@@ -623,6 +727,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "sar":
+            _read(args.case_id, "narratives")
             if services.store.get_case(args.case_id) is None:
                 print(f"case not found: {args.case_id}", file=sys.stderr)
                 return 1
@@ -647,11 +752,16 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "verify-sar":
+            _write(args.case_id, "narratives", derivation=True)
             verification = services.sar.verify_narrative(args.case_id)
             print(json.dumps(verification.model_dump(mode="json"), indent=2))
         elif args.command == "approve-sar":
             from .models import ApprovalOutcome
 
+            _write(
+                args.case_id, "approvals",
+                actor=args.approver, role=args.role,
+            )
             approval = services.approvals.decide_narrative(
                 args.case_id,
                 approver_id=args.approver,
@@ -672,6 +782,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "case-file":
+            _read(args.case_id, "custody")
             if services.store.get_case(args.case_id) is None:
                 print(f"case not found: {args.case_id}", file=sys.stderr)
                 return 1
@@ -682,6 +793,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "seal":
+            _write(
+                args.case_id, "custody",
+                actor=args.officer, role=args.role,
+            )
             seal = services.sealing.seal_case(
                 args.case_id,
                 officer_id=args.officer,
@@ -694,6 +809,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "unseal":
+            _write(
+                args.case_id, "custody",
+                actor=args.officer, role=args.role,
+            )
             unseal = services.sealing.unseal_case(
                 args.case_id,
                 officer_id=args.officer,
@@ -703,6 +822,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(unseal.model_dump(mode="json"), indent=2))
         elif args.command == "hold":
+            _write(
+                args.case_id, "custody",
+                actor=args.officer, role=args.role,
+            )
             event = services.sealing.place_hold(
                 args.case_id,
                 officer_id=args.officer,
@@ -712,6 +835,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(event.model_dump(mode="json"), indent=2))
         elif args.command == "release-hold":
+            _write(
+                args.case_id, "custody",
+                actor=args.officer, role=args.role,
+            )
             event = services.sealing.release_hold(
                 args.case_id,
                 officer_id=args.officer,
@@ -721,6 +848,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(event.model_dump(mode="json"), indent=2))
         elif args.command == "export":
+            _read(args.case_id, "export")
             package = services.sealing.export_case_file(args.case_id)
             rendered = json.dumps(package, indent=2)
             if args.out:
@@ -753,6 +881,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "clock":
             from datetime import date
 
+            _read(args.case_id, "clocks")
             as_of = (
                 date.fromisoformat(args.as_of)
                 if args.as_of
@@ -770,6 +899,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             services.clocks.refresh_all_escalations(as_of=as_of)
             board = services.clocks.clock_board(as_of=as_of)
+            visible = _visible_ids()
+            if visible is not None:
+                board = [v for v in board if v.case_id in visible]
             print(
                 json.dumps(
                     [v.model_dump(mode="json") for v in board], indent=2
@@ -785,12 +917,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             services.clocks.refresh_all_escalations(as_of=as_of)
             queue = services.clocks.escalation_queue(as_of=as_of)
+            visible = _visible_ids()
+            if visible is not None:
+                queue = [e for e in queue if e.case_id in visible]
             print(
                 json.dumps(
                     [e.model_dump(mode="json") for e in queue], indent=2
                 )
             )
         elif args.command == "open-review":
+            _write(args.case_id, "reviews", actor=args.actor)
             review = services.reviews.open_review(
                 args.case_id, actor=args.actor
             )
@@ -802,6 +938,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "review":
             from datetime import date
 
+            _read(args.case_id, "reviews")
             clocks = services.clocks.case_clocks(
                 args.case_id, as_of=date.today()
             )
@@ -824,15 +961,35 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "reviews":
-            print(
-                json.dumps(
-                    services.reviews.history_for_customer(args.customer),
-                    indent=2,
-                )
-            )
+            history = services.reviews.history_for_customer(args.customer)
+            if access is not None:
+                visible = {
+                    c.case_id
+                    for c in access.check_customer_read(
+                        _identity(), args.customer
+                    )
+                }
+                history = {
+                    **history,
+                    "reviews": [
+                        r
+                        for r in history["reviews"]
+                        if r.get("case_id") in visible
+                    ],
+                    "dispositions": [
+                        d
+                        for d in history["dispositions"]
+                        if d.get("case_id") in visible
+                    ],
+                }
+            print(json.dumps(history, indent=2))
         elif args.command == "disposition-review":
             from .models import ReviewOutcome
 
+            _write(
+                args.case_id, "reviews",
+                actor=args.analyst, role=args.role,
+            )
             disposition = services.reviews.record_review_disposition(
                 args.case_id,
                 args.review_id,
@@ -850,6 +1007,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "open-due-reviews":
             from datetime import date
 
+            _door("review_tick", actor=args.actor)
             as_of = (
                 date.fromisoformat(args.as_of)
                 if args.as_of
@@ -867,6 +1025,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "quarantine":
+            _read(args.case_id, "quarantine")
             records = services.quarantine.records_for(args.case_id)
             print(
                 json.dumps(
@@ -875,16 +1034,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "quarantine-queue":
+            entries = services.quarantine.queue()
+            visible = _visible_ids()
+            if visible is not None:
+                entries = [e for e in entries if e.case_id in visible]
             print(
                 json.dumps(
-                    [
-                        e.model_dump(mode="json")
-                        for e in services.quarantine.queue()
-                    ],
+                    [e.model_dump(mode="json") for e in entries],
                     indent=2,
                 )
             )
         elif args.command == "quarantine-review":
+            _write(args.case_id, "quarantine", actor=args.reviewer)
             review = services.quarantine.mark_reviewed(
                 args.case_id,
                 args.quarantine_seq,
@@ -895,6 +1056,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "profile":
             from datetime import date
 
+            if access is not None:
+                access.check_customer_write(
+                    _identity(args.actor), args.customer_id
+                )
             as_of = (
                 date.fromisoformat(args.as_of)
                 if args.as_of
@@ -905,12 +1070,17 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(view.model_dump(mode="json"), indent=2))
         elif args.command == "profile-show":
+            if access is not None:
+                access.check_customer_read(_identity(), args.customer_id)
             view = services.profiles.latest_view(args.customer_id)
             print(json.dumps(view.model_dump(mode="json"), indent=2))
         elif args.command == "case-profile":
+            _read(args.case_id, "profiles")
             view = services.profiles.profile_for_case(args.case_id)
             print(json.dumps(view.model_dump(mode="json"), indent=2))
         elif args.command == "counterparties":
+            if access is not None:
+                access.check_customer_read(_identity(), args.customer_id)
             views = services.profiles.counterparties_for_customer(
                 args.customer_id
             )
@@ -920,11 +1090,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "counterparty":
+            if access is not None:
+                access.check_customer_read(_identity(), args.customer_id)
             view = services.profiles.counterparty_detail(
                 args.customer_id, args.name
             )
             print(json.dumps(view.model_dump(mode="json"), indent=2))
         elif args.command == "shared-counterparties":
+            _portfolio("shared_counterparties")
             shared = services.profiles.shared_counterparties()
             print(
                 json.dumps(
@@ -934,6 +1107,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "media-search":
             from datetime import date
 
+            _write(args.case_id, "media", actor=args.actor)
             as_of = (
                 date.fromisoformat(args.as_of)
                 if args.as_of
@@ -949,6 +1123,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "media-assessments":
+            _read(args.case_id, "media")
             results = services.media.list_assessments(args.case_id)
             print(
                 json.dumps(
@@ -957,6 +1132,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "media-assessment":
+            _read(args.case_id, "media")
             assessment = services.media.get_assessment(
                 args.case_id, args.assessment_id
             )
@@ -982,12 +1158,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "case-costs":
+            _read(args.case_id, "ledger")
             print(
                 json.dumps(
                     services.gateway.case_rollup(args.case_id), indent=2
                 )
             )
         elif args.command == "case-ledger":
+            _read(args.case_id, "ledger")
             entries = services.store.list_call_entries(args.case_id)
             print(
                 json.dumps(
@@ -996,6 +1174,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "portfolio-costs":
+            _portfolio("daily_costs")
             print(
                 json.dumps(
                     {"rows": services.gateway.portfolio_rollup()},
@@ -1010,6 +1189,20 @@ def main(argv: list[str] | None = None) -> int:
             "report-ops",
         ):
             from datetime import date as _date
+
+            # Portfolio-level reads: an explicit caller must hold
+            # a reports role; no caller runs as the system
+            # derivation (never as an analyst).
+            if access is not None:
+                identity = _identity()
+                access.check_portfolio(
+                    identity
+                    if identity is not None
+                    else CallerIdentity(
+                        person_id="system", role="system"
+                    ),
+                    "reports",
+                )
 
             def _parse(value):
                 return _date.fromisoformat(value) if value else None
@@ -1027,6 +1220,41 @@ def main(argv: list[str] | None = None) -> int:
                 "report-ops": pack.ops,
             }[args.command]
             print(json.dumps(section.model_dump(mode="json"), indent=2))
+        elif args.command == "assign":
+            actor = _identity(args.actor, args.role)
+            if actor is None:
+                print(
+                    "error: an assignment requires a named actor",
+                    file=sys.stderr,
+                )
+                return 1
+            case, seq = access.assign_case(
+                args.case_id,
+                assignee_id=args.assignee_id,
+                actor=actor,
+            )
+            print(
+                json.dumps(
+                    {
+                        "case": case.model_dump(mode="json"),
+                        "evidence_seq": seq,
+                    },
+                    indent=2,
+                )
+            )
+        elif args.command == "denials":
+            _portfolio("denials")
+            print(
+                json.dumps(
+                    [
+                        e.model_dump(mode="json")
+                        for e in access.denials()
+                    ],
+                    indent=2,
+                )
+            )
+        elif args.command == "access-policy":
+            print(json.dumps(access_policy_document(), indent=2))
     except AmlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
