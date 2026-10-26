@@ -1227,7 +1227,16 @@ call priced, ledgered, and budget-checked before transport.
    events with exact spans, composers receive the text only
    fenced, verifiers ground against the span-masked token set,
    and an analyst's review is an audit act that never un-fences.
-8. Rubber-stamping is measured (draft-vs-final diff) — R5/R17.
+8. Rubber-stamping is measured (draft-vs-final diff) — the raw
+   material lands at R5 (every disposition cites the record
+   version it relied on; every record version stores its diff;
+   narratives are append-only versions decided once), and R17
+   builds the measurement surface on it: findings added /
+   removed / changed between first draft and decided version,
+   narratives approved unedited vs after a re-draft with the
+   distance in stated bands, confirmation patterns, and
+   decision-latency distributions — presented as measurements
+   with their limits stated, never as scores.
 
 ## Postgres profile + production smoke (R16) — the store, proven
 
@@ -1286,6 +1295,102 @@ there); the image and compose contracts are graded statically by
 `tests/test_docker_contract.py`, and the smoke proves the
 application the image ships, on the store the compose stack
 provisions.
+
+## Management reporting (R17) — Law 8, measured
+
+`reporting.py` builds the management report pack from the same
+stored artefacts the gates wrote. It is a pure read-model in the
+derived-artefact discipline of the clocks (R8) and the profile
+views (R11): nothing is stored, every figure is reproducible
+from the underlying records, the pack names its `as_of`, and
+`pack_id = rep-<sha256[:16]>` over the pack's canonical JSON —
+the same artefacts at the same date rebuild the same pack byte
+for byte. The pack carries an `inputs` counter (artefact family
+→ records read), and every section carries a `sources` list
+naming the store reads its figures came from; a figure with no
+stated source is an eval failure, not a style point.
+
+- **Queue ageing.** Open cases (status not terminal) aged from
+  detection date at `as_of`, grouped by status, monitoring rule
+  and severity over stated buckets (`0-7, 8-30, 31-60, 61-90,
+  91+`), plus the ten oldest. The two queues that wait on named
+  humans are aged separately: `pending_confirmation` cases name
+  the dispositioning analyst and disposition from the standing
+  unconfirmed confirmation-requiring disposition and wait on the
+  `l2_reviewer` role; `sar_pending` cases are staged from the
+  artefacts — `awaiting_draft` (after escalation or a rejection),
+  `awaiting_verification` (a draft stands unverified),
+  `awaiting_approval` (verified, undecided) — and name the
+  routing disposition's analyst. Person-level detail is exactly
+  what the artefacts already record; the report aggregates
+  nothing about a person beyond it.
+- **Clock board.** The R8 derivation read portfolio-wide at
+  `as_of`: filing clocks by state, each case's current
+  continuing cycle by state, and the overdue list (days overdue
+  from the clock's own days-remaining). Deadline performance
+  grades every clock that reached a terminal state: a filing
+  ends satisfied on its determination date (approval date, else
+  closing disposition date — the clock service's own rule) or
+  closed-no-file on the standing no-file decision date; a
+  continuing cycle answered by a review disposition is measured
+  against its review deadline (no-file) or filing deadline
+  (file-continuing with a filing), and a cycle the case's own
+  ending closed against its filing deadline. Lateness is
+  `ended_on > operative deadline` — so a documented no-file
+  decision recorded after its deadline counts LATE: the
+  documentation stands, and so does the lateness (the R15 rule,
+  carried into reporting unchanged). The performance section is
+  windowed (`window_start`/`window_end`); states and the overdue
+  list read at `as_of`.
+- **Rubber-stamp metrics.** Records: per case, the diffs stored
+  on record versions 2..decided-version are summed (decided
+  version = the standing — latest — disposition's cited
+  version; a version carrying no stored diff falls back to a
+  recomputed key-set diff, the R4 discipline restated); headline
+  counts split cases decided on the first draft vs a revised
+  record. Narratives: the approved version's rendered text is
+  compared to the first draft's — identical is `approved
+  without edit`; otherwise a normalised edit distance
+  (1 − difflib `SequenceMatcher` ratio) in stated bands (none /
+  light ≤ 0.10 / moderate ≤ 0.35 / heavy), with re-draft
+  approvals counted. Confirmations: of the dispositions that
+  required a second person, how many stand confirmed (with /
+  without a note — a confirmation cannot modify what it
+  answers, so the note is the only recorded trace of engagement
+  beyond the act), declined, or awaiting, plus a per-analyst
+  table. Decision times: hours from the artefact a gate decided
+  on to the decision, per deciding actor at each of the three
+  gates, as median and nearest-rank p90. The section ships its
+  `measures` and `cannot_measure` lists in the artefact itself:
+  it cannot show whether anyone read the evidence or whether a
+  decision was right, and no figure in it ranks or scores a
+  person.
+- **Operations.** Typology volume grouped by check and
+  rule-pack version (findings per run of the pack as an exact
+  Decimal string, against the pack's portfolio run count);
+  screening grouped by list version — hits by standing, with
+  namesake clearances (`cleared_reason =
+  date_of_birth_mismatch`) counted separately and cases screened
+  read from the runs' pins; quarantine records and matches by
+  pattern family and source kind, with flagged/reviewed standing
+  from the queue (when no quarantine service is wired the
+  section reports `available: false` and no figures, rather
+  than invented ones); the media band distribution zero-filled
+  over the full band vocabulary; and model spend from the R13
+  ledger — calls, tokens and exact Decimal cost by profile and
+  by purpose.
+
+Surfaces: `GET /reports/pack` (with `as_of`, `window_start`,
+`window_end`) and one route per section, all reads; the CLI's
+`report-*` commands print the same artefacts; the analyst
+console gains a Reports view fed by the pack route through its
+existing single `api()` helper — the surface scan still proves
+every console call maps to a real route, and the view adds no
+write path. The eval gate grades the derivations as Scenario 20
+against a purpose-built book with hand-computed expectations:
+`report_figure_wrong`, `report_late_counted_on_time`,
+`report_rubber_stamp_wrong`, `report_unstated_source` and
+`report_positive_paths_failed` are zero-tolerance.
 
 ## Round map (20)
 

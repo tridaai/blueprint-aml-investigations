@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R16 of 20)
+## What is built at this round (R17 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -441,8 +441,50 @@ docker compose up --build
   `JSONB` payload columns against the store's JSON-text
   contract (the columns are `TEXT` now, both dialects alike).
 
-The rest — reporting, access control, the red team, and
-release hardening — lands in R17–R20 per the round map in
+- **R17 — management reporting, derived in code.** A versioned
+  report pack (`2026.10.1`) computed from the stored artefacts
+  at a named `as_of` — a pure read-model in the clocks'
+  discipline: nothing is stored, and the pack is
+  content-addressed, so the same artefacts at the same date
+  rebuild the same pack byte for byte. Four sections, each
+  naming the store reads its figures came from, with the pack
+  counting the artefacts it was derived from. *Queue ageing*:
+  open cases by status × age bucket, by rule and severity, the
+  oldest cases, and the two queues that wait on named humans —
+  pending confirmations (waiting on an L2 reviewer, the
+  dispositioning analyst named from the record) and SAR-pending
+  cases by stage (drafting, citation verification, dual-control
+  approval). *Clock board*: the R8 clocks portfolio-wide, the
+  overdue list, and deadline performance over a window — a
+  documented no-file decision recorded after its deadline
+  counts as LATE here, never as satisfied, the R15 honesty
+  carried through unchanged. *Rubber-stamp metrics* (Law 8's
+  payoff): findings added / removed / changed between the
+  first composed investigation record and the version the
+  disposition was decided on; SAR narratives approved without
+  any edit vs after a re-draft, with the draft-to-approved
+  distance in stated bands; confirmation patterns at the
+  adverse-close gate, including a per-analyst confirmation-rate
+  table; and decision-latency distributions (median / p90) at
+  the three gates. Measurements only — the section states in
+  words what it measures and what it cannot (it cannot show
+  whether anyone read the evidence, or whether a decision was
+  right), and it scores and ranks nobody. *Operations*:
+  typology finding volume by check and rule-pack version,
+  screening outcomes by list version with namesake clearances
+  counted separately, quarantine counts by pattern family,
+  the media band distribution, and model spend by profile and
+  purpose from the R13 ledger. Served at `GET /reports/pack`
+  (plus one route per section), from the CLI (`report-pack`
+  and friends), and in the analyst console's new Reports view
+  — read-only everywhere; the console gains no write path.
+  The eval gate grades the pack against a hand-computed
+  fixture book as Scenario 20 (every headline figure, the
+  late-counts-late rule, and the rubber-stamp metrics are
+  zero-tolerance).
+
+The rest — access control, the red team, and release
+hardening — lands in R18–R20 per the round map in
 `docs/architecture.md`.
 
 ## Configuration
@@ -471,7 +513,7 @@ release hardening — lands in R17–R20 per the round map in
 ## Tests and evals
 
 ```bash
-make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, KYC profiles, counterparties, adverse media, model gateway, analyst console, the trap suite, API, SQL store
+make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, KYC profiles, counterparties, adverse media, model gateway, analyst console, management reporting, the trap suite, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
 

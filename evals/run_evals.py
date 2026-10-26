@@ -102,6 +102,11 @@ Zero-tolerance counters:
     (scenario 19 runs only when AML_EVAL_DATABASE_URL or
     DATABASE_URL names a server; otherwise it is skipped and
     the skip is counted in pg_checks_skipped, never silent)
+  - report figures wrong vs the graded book (R17). must be 0
+  - late decisions counted on time (R17) ......... must be 0
+  - rubber-stamp metrics wrong (R17) ............. must be 0
+  - report sections from unstated sources (R17)... must be 0
+  - report positive paths failing (R17) .......... must be 0
 
 Exit code 0 iff the gate passes.
 """
@@ -467,6 +472,13 @@ def main() -> int:
         "trap_altered_batch_swallowed": 0,
         "trap_profile_conflict_merged": 0,
         "trap_positive_paths_failed": 0,
+        # R17 reporting counters
+        "report_cases_graded": 0,
+        "report_figure_wrong": 0,
+        "report_late_counted_on_time": 0,
+        "report_rubber_stamp_wrong": 0,
+        "report_unstated_source": 0,
+        "report_positive_paths_failed": 0,
     }
 
     store = InMemoryCaseStore()
@@ -5186,7 +5198,402 @@ def main() -> int:
             f"{counters.get('pg_suite_tests_compared', 0)} shared tests"
         )
 
-    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9+R10+R11+R12+R13+R14+R15+R16 counters")
+    # -- Scenario 20 (R17): management reporting. -----------------------
+    # The pack is derived in code from stored artefacts; this
+    # scenario grades it against a purpose-built book whose
+    # artefacts are constructed directly with pinned timestamps,
+    # so every headline figure has a hand-computed value: ageing
+    # over one open case, two filings (one narrative approved
+    # exactly as drafted, one approved only after a re-draft),
+    # and a documented no-file decision recorded five days after
+    # its deadline — which must read LATE, never satisfied. The
+    # pack must name its sources per section and count its
+    # inputs, and rebuild byte-for-byte. Positive path: the pack
+    # renders over the reference seed book through the API.
+    # ---------------------------------------------------------------
+    from aml_investigations.config import Settings as _RSettings
+    from aml_investigations.models import (
+        AlertSeverity as _RSeverity,
+    )
+    from aml_investigations.models import (
+        ApprovalOutcome as _RApprovalOutcome,
+    )
+    from aml_investigations.models import (
+        Case as _RCase,
+    )
+    from aml_investigations.models import (
+        CaseStatus as _RCaseStatus,
+    )
+    from aml_investigations.models import (
+        CounterSearch as _RCounterSearch,
+    )
+    from aml_investigations.models import (
+        DispositionOutcome as _RDispositionOutcome,
+    )
+    from aml_investigations.models import (
+        DispositionRecord as _RDispositionRecord,
+    )
+    from aml_investigations.models import (
+        Hypothesis as _RHypothesis,
+    )
+    from aml_investigations.models import (
+        InvestigationFinding as _RFinding,
+    )
+    from aml_investigations.models import (
+        InvestigationRecord as _RRecord,
+    )
+    from aml_investigations.models import (
+        NarrativeSection as _RSection,
+    )
+    from aml_investigations.models import (
+        NarrativeStatement as _RStatement,
+    )
+    from aml_investigations.models import (
+        RecordDiff as _RDiff,
+    )
+    from aml_investigations.models import (
+        SarApproval as _RApproval,
+    )
+    from aml_investigations.models import (
+        SarNarrative as _RNarrative,
+    )
+    from aml_investigations.wiring import build_services as _rbuild
+
+    _rtmp = Path(tempfile.mkdtemp(prefix="aml-evals-report-"))
+    _rrepo = Path(__file__).resolve().parents[1]
+
+    def _rsettings(tmp: Path):
+        return _RSettings(
+            database_url=None,
+            sqlite_path=tmp / "aml.db",
+            migrations_dir=_rrepo / "migrations",
+            object_store_dir=tmp / "objects",
+            s3_endpoint_url=None,
+            s3_bucket="aml-evidence",
+            seed_alerts_path=_rrepo / "data" / "seed_alerts.json",
+            screening_lists_path=_rrepo / "data" / "screening_lists.json",
+            transaction_streams_path=_rrepo
+            / "data"
+            / "transaction_streams.json",
+            typology_rules_path=_rrepo / "data" / "typology_rules.json",
+            adverse_media_path=_rrepo / "data" / "adverse_media.json",
+            model_profiles_path=_rrepo / "data" / "model_profiles.json",
+            model_prices_path=_rrepo / "data" / "model_prices.json",
+            model_profile="offline",
+            log_level="WARNING",
+        )
+
+    def _rts(month, day, hour=9):
+        return datetime(2026, month, day, hour, tzinfo=timezone.utc)
+
+    def _rcase(case_id, status, detected):
+        return _RCase(
+            case_id=case_id,
+            alert_id=f"ALRT-{case_id}",
+            customer_id=f"CUST-{case_id}",
+            account_id=f"ACCT-{case_id}",
+            rule_id="structuring",
+            severity=_RSeverity.HIGH,
+            status=status,
+            detected_on=detected,
+        )
+
+    def _rrecord(case_id, version, created, *, diff=None):
+        return _RRecord(
+            case_id=case_id,
+            version=version,
+            actor="investigation-service",
+            created_at=created,
+            input_fingerprint=f"fp-{case_id}-v{version}",
+            findings=[
+                _RFinding(
+                    key="k1",
+                    kind="typology",
+                    origin="typology",
+                    statement="A finding.",
+                    weight="high",
+                    direction="supports",
+                )
+            ],
+            hypothesis=_RHypothesis(
+                label="structuring", statement="Possible structuring."
+            ),
+            counter_search=_RCounterSearch(coverage="the stored window"),
+            diff=diff,
+        )
+
+    def _rdisp(case_id, analyst, outcome, decided, record):
+        return _RDispositionRecord(
+            case_id=case_id,
+            analyst_id=analyst,
+            analyst_role="analyst",
+            outcome=outcome,
+            rationale_codes=["coded_reason"],
+            rationale_vocabulary_version="2026.10.1",
+            record_id=record.record_id,
+            record_version=record.version,
+            decided_at=decided,
+        )
+
+    def _rnarrative(case_id, version, created, text, record, disp):
+        return _RNarrative(
+            case_id=case_id,
+            version=version,
+            record_id=record.record_id,
+            record_version=record.version,
+            disposition_id=disp.disposition_id,
+            drafted_by="drafting-service",
+            created_at=created,
+            sections=[
+                _RSection(
+                    key="activity_summary",
+                    title="Activity Summary",
+                    statements=[
+                        _RStatement(
+                            statement_id="activity_summary-1", text=text
+                        )
+                    ],
+                )
+            ],
+        )
+
+    def _rapproval(case, narrative, disp, outcome, decided, record):
+        return _RApproval(
+            case_id=case,
+            narrative_id=narrative.narrative_id,
+            narrative_version=narrative.version,
+            record_id=record.record_id,
+            record_version=record.version,
+            disposition_id=disp.disposition_id,
+            approver_id="d.reyes",
+            approver_role="l2_reviewer",
+            outcome=outcome,
+            reason_codes=(
+                ["narrative_incomplete"]
+                if outcome is _RApprovalOutcome.REJECTED
+                else []
+            ),
+            reason_vocabulary_version=(
+                "2026.10.1"
+                if outcome is _RApprovalOutcome.REJECTED
+                else ""
+            ),
+            decided_at=decided,
+        )
+
+    _rsvc = _rbuild(_rsettings(_rtmp))
+    _rstore = _rsvc.store
+    # One open case, detected 2026-09-25 (age 25 at the as_of).
+    _rstore.create_case(
+        _rcase("E20-OPEN", _RCaseStatus.OPENED, date(2026, 9, 25))
+    )
+    counters["report_cases_graded"] += 1
+    # Filed on time; the record moved once before decision; the
+    # narrative was approved exactly as drafted.
+    _rstore.create_case(
+        _rcase("E20-CLEAN", _RCaseStatus.FILED_SAR, date(2026, 8, 20))
+    )
+    _clean_v1 = _rrecord("E20-CLEAN", 1, _rts(8, 21, 8))
+    _clean_v2 = _rrecord(
+        "E20-CLEAN",
+        2,
+        _rts(8, 22, 8),
+        diff=_RDiff(
+            from_version=1, added=["k2"], changed=["k1"]
+        ),
+    )
+    _rstore.add_investigation_record(_clean_v1)
+    _rstore.add_investigation_record(_clean_v2)
+    _clean_disp = _rdisp(
+        "E20-CLEAN",
+        "b.sen",
+        _RDispositionOutcome.ESCALATE_SAR,
+        _rts(8, 23, 8),
+        _clean_v2,
+    )
+    _rstore.add_disposition(_clean_disp)
+    _clean_narr = _rnarrative(
+        "E20-CLEAN",
+        1,
+        _rts(8, 24, 8),
+        "The customer moved funds in a pattern.",
+        _clean_v2,
+        _clean_disp,
+    )
+    _rstore.add_narrative(_clean_narr)
+    _rstore.add_approval(
+        _rapproval(
+            "E20-CLEAN",
+            _clean_narr,
+            _clean_disp,
+            _RApprovalOutcome.APPROVED,
+            _rts(8, 25, 8),
+            _clean_v2,
+        )
+    )
+    counters["report_cases_graded"] += 1
+    # Filed on time; the first draft was rejected and the re-draft
+    # approved — the rubber-stamp metrics must see the edit.
+    _rstore.create_case(
+        _rcase("E20-EDITED", _RCaseStatus.FILED_SAR, date(2026, 7, 1))
+    )
+    _ed_rec = _rrecord("E20-EDITED", 1, _rts(7, 2, 8))
+    _rstore.add_investigation_record(_ed_rec)
+    _ed_disp = _rdisp(
+        "E20-EDITED",
+        "a.okafor",
+        _RDispositionOutcome.ESCALATE_SAR,
+        _rts(7, 3, 8),
+        _ed_rec,
+    )
+    _rstore.add_disposition(_ed_disp)
+    _ed_n1 = _rnarrative(
+        "E20-EDITED",
+        1,
+        _rts(7, 4, 8),
+        "The customer moved funds in a pattern.",
+        _ed_rec,
+        _ed_disp,
+    )
+    _ed_n2 = _rnarrative(
+        "E20-EDITED",
+        2,
+        _rts(7, 6, 8),
+        "Between March and May the account received forty-one "
+        "credits from three unrelated senders and forwarded the "
+        "balance abroad within hours of each receipt, leaving "
+        "only a small residue after every transfer.",
+        _ed_rec,
+        _ed_disp,
+    )
+    _rstore.add_narrative(_ed_n1)
+    _rstore.add_narrative(_ed_n2)
+    _rstore.add_approval(
+        _rapproval(
+            "E20-EDITED",
+            _ed_n1,
+            _ed_disp,
+            _RApprovalOutcome.REJECTED,
+            _rts(7, 5, 8),
+            _ed_rec,
+        )
+    )
+    _rstore.add_approval(
+        _rapproval(
+            "E20-EDITED",
+            _ed_n2,
+            _ed_disp,
+            _RApprovalOutcome.APPROVED,
+            _rts(7, 7, 8),
+            _ed_rec,
+        )
+    )
+    counters["report_cases_graded"] += 1
+    # A documented no-file decision recorded five days after its
+    # outer deadline (detected 2026-06-01, deadline 2026-07-31).
+    _rstore.create_case(
+        _rcase("E20-LATE", _RCaseStatus.CLOSED, date(2026, 6, 1))
+    )
+    _late_rec = _rrecord("E20-LATE", 1, _rts(8, 4))
+    _rstore.add_investigation_record(_late_rec)
+    _rstore.add_disposition(
+        _rdisp(
+            "E20-LATE",
+            "a.okafor",
+            _RDispositionOutcome.CLOSE_NO_ACTION,
+            _rts(8, 5),
+            _late_rec,
+        )
+    )
+    counters["report_cases_graded"] += 1
+
+    _as_of = date(2026, 10, 20)
+    _pack = _rsvc.reports.build_pack(as_of=_as_of)
+    _ageing = _pack.queue_ageing
+    if (
+        _ageing.open_cases != 1
+        or _ageing.oldest[0].case_id != "E20-OPEN"
+        or _ageing.oldest[0].age_days != 25
+    ):
+        counters["report_figure_wrong"] += 1
+    _board = _pack.clock_board
+    if (
+        _board.filing_by_state["satisfied"] != 2
+        or _board.filing_by_state["closed_no_file"] != 1
+        or _board.filing_by_state["on_track"] != 1
+    ):
+        counters["report_figure_wrong"] += 1
+    _perf = _board.performance
+    if _perf.clocks_ended != 3 or _perf.on_time != 2 or _perf.late != 1:
+        counters["report_figure_wrong"] += 1
+    for _entry in _perf.entries:
+        if _entry.case_id == "E20-LATE" and (
+            _entry.on_time or _entry.days_late != 5
+        ):
+            counters["report_late_counted_on_time"] += 1
+    _rubber = _pack.rubber_stamp
+    if (
+        _rubber.record_cases_decided != 3
+        or _rubber.decided_on_first_draft != 2
+        or _rubber.decided_on_revised_record != 1
+        or _rubber.findings_added != 1
+        or _rubber.findings_changed != 1
+        or _rubber.narratives_approved != 2
+        or _rubber.approved_without_edit != 1
+        or _rubber.approved_after_redraft != 1
+        or _rubber.edit_bands.get("none") != 1
+        or _rubber.edit_bands.get("heavy") != 1
+    ):
+        counters["report_rubber_stamp_wrong"] += 1
+    if (
+        _pack.inputs.get("cases") != 4
+        or not _pack.queue_ageing.sources
+        or not _pack.clock_board.sources
+        or not _pack.rubber_stamp.sources
+        or not _pack.ops.sources
+    ):
+        counters["report_unstated_source"] += 1
+    if _rsvc.reports.build_pack(as_of=_as_of).pack_id != _pack.pack_id:
+        counters["report_figure_wrong"] += 1
+
+    # Positive path: the pack renders over the reference seed
+    # book, and the API serves it.
+    _rtmp2 = Path(tempfile.mkdtemp(prefix="aml-evals-report-seed-"))
+    _rsvc2 = _rbuild(_rsettings(_rtmp2))
+    import json as _rjson
+
+    _seed_ids = [
+        row["alert_id"]
+        for row in _rjson.loads(
+            (_rrepo / "data" / "seed_alerts.json").read_text()
+        )["alerts"]
+    ]
+    for _alert_id in _seed_ids:
+        _rsvc2.intake.open_case(_alert_id)
+    _seed_cases = _rsvc2.store.list_cases()
+    _seed_pack = _rsvc2.reports.build_pack(as_of=_as_of)
+    from fastapi.testclient import TestClient as _RTestClient
+
+    from aml_investigations.api import create_app as _rcreate_app
+
+    _rclient = _RTestClient(_rcreate_app(_rsvc2))
+    _rresp = _rclient.get("/reports/pack", params={"as_of": "2026-10-20"})
+    if (
+        not _seed_cases
+        or _seed_pack.queue_ageing.open_cases != len(_seed_cases)
+        or _rresp.status_code != 200
+        or _rresp.json()["pack_id"] != _seed_pack.pack_id
+    ):
+        counters["report_positive_paths_failed"] += 1
+    print(
+        "scenario 20 (reporting): graded "
+        f"{counters['report_cases_graded']} fixture cases, seed pack "
+        f"over {len(_seed_cases)} cases, figure errors "
+        f"{counters['report_figure_wrong']}, rubber-stamp errors "
+        f"{counters['report_rubber_stamp_wrong']}"
+    )
+
+    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9+R10+R11+R12+R13+R14+R15+R16+R17 counters")
     for key, value in counters.items():
         print(f"  {key}: {value}")
     zero_tolerance = [
@@ -5294,6 +5701,11 @@ def main() -> int:
         "pg_migration_failures",
         "prod_smoke_step_failures",
         "pg_suite_parity_gap",
+        "report_figure_wrong",
+        "report_late_counted_on_time",
+        "report_rubber_stamp_wrong",
+        "report_unstated_source",
+        "report_positive_paths_failed",
     ]
     passed = all(counters[k] == 0 for k in zero_tolerance) and counters["cases_opened"] == len(ALERTS)
     print("GATE: PASS" if passed else "GATE: FAIL")
