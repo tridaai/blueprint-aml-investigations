@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R15 of 20)
+## What is built at this round (R16 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -418,9 +418,32 @@ docker compose up --build
   refused whole, before anything is written, and identical
   re-deliveries dedupe).
 
-The rest — the Postgres production profile, reporting,
-access control, the red team, and release hardening — lands
-in R16–R20 per the round map in `docs/architecture.md`.
+- **R16 — the Postgres production profile, proven.** Until now
+  the SQL adapter was sampled: the suite ran on the in-memory
+  double with one SQLite replay per domain. R16 runs the
+  *entire* suite against a real PostgreSQL 16 — a parity mode
+  (`AML_TEST_DATABASE_URL`, see `tests/pg_parity.py`) swaps
+  every store construction for a Postgres store over its own
+  migrated schema, reopen tests included: **389 passed, the
+  same count as the default profile**. The migration runner
+  is graded on an empty Postgres database (0001–0011 apply in
+  order; a re-run applies nothing), and a production smoke
+  (`scripts/prod_smoke.py`) boots the real app on a fresh
+  database and walks the seeded structuring case over HTTP
+  through all 20 lifecycle steps — intake to a sealed,
+  offline-verified export — asserting state at each one. The
+  eval gate carries the three legs as Scenario 19 when a
+  server is provided, and counts the skip when none is.
+  Parity caught two real defects, both fixed at the owning
+  layer: the migration runner read its own ledger in a way a
+  dict-row Postgres connection raises on (a migrated database
+  could not be reopened), and four migrations had drifted to
+  `JSONB` payload columns against the store's JSON-text
+  contract (the columns are `TEXT` now, both dialects alike).
+
+The rest — reporting, access control, the red team, and
+release hardening — lands in R17–R20 per the round map in
+`docs/architecture.md`.
 
 ## Configuration
 
@@ -451,6 +474,21 @@ in R16–R20 per the round map in `docs/architecture.md`.
 make test    # pytest — state machine, hash chain, intake, screening, typologies, investigations, dispositions, SAR narratives, approvals, sealing, regulatory clocks, continuing reviews, quarantine, KYC profiles, counterparties, adverse media, model gateway, analyst console, the trap suite, API, SQL store
 make evals   # eval gate — zero-tolerance counters must stay 0
 ```
+
+The Postgres profile (R16) is graded, not assumed. With a
+server available:
+
+```bash
+AML_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5433/aml_parity make test
+# the entire suite on the Postgres adapter — same 389 passes
+DATABASE_URL=postgresql://postgres@127.0.0.1:5433/aml_parity make prod-smoke
+# the real app on a fresh database, 20 lifecycle steps over HTTP
+AML_EVAL_DATABASE_URL=postgresql://postgres@127.0.0.1:5433/aml_parity make evals
+# Scenario 19 grades migrations, the smoke, and suite parity
+```
+
+Without a server, the Postgres tests skip (counted) and the
+eval gate counts Scenario 19 as skipped — never silent.
 
 Eval counters include: cases closed without an analyst disposition
 (0), unlawful transitions accepted (0), evidence chains failing
@@ -498,7 +536,10 @@ transport (0), ledger costs not matching tokens × price
 (0), console queue inputs disagreeing (0), console workspace
 artefact kinds missing (0), console-only write paths (0),
 unescaped render paths in the console (0), and console
-positive paths failing (0).
+positive paths failing (0). With a Postgres server provided,
+the gate adds: Postgres migration failures (0), production
+smoke step failures (0), and suite outcome gaps between the
+Postgres and default profiles (0).
 
 ## Honest status
 
@@ -534,8 +575,16 @@ positive paths failing (0).
   every composer and verifier that touches it — the whole file
   readable in the analyst console (R14), which renders it as
   text and acts on it only through the same gated routes.
-- The Docker image builds in CI-grade environments; the compose
-  stack is the supported local full-stack path.
+- The Postgres production profile is verified (R16): the full
+  test suite passes unchanged on PostgreSQL 16 (389 tests,
+  parity-graded in the eval gate), the migrations apply and
+  re-run cleanly on an empty database, and the production
+  smoke walks a case end to end over HTTP on a fresh database.
+  The Docker image build itself was not run in the build
+  sandbox (no Docker daemon there) — the Dockerfile and
+  compose contracts are graded statically
+  (`tests/test_docker_contract.py`), and the compose stack
+  remains the supported local full-stack path.
 
 ## Data note
 

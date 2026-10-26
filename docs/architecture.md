@@ -1229,6 +1229,64 @@ call priced, ledgered, and budget-checked before transport.
    and an analyst's review is an audit act that never un-fences.
 8. Rubber-stamping is measured (draft-vs-final diff) — R5/R17.
 
+## Postgres profile + production smoke (R16) — the store, proven
+
+Until this round the SQL adapter was proven the way most suites
+prove it: the in-memory double carried the tests, and one replay
+per domain exercised SQLite. The Postgres adapter — the one a
+deployment actually runs — was only ever constructed, never graded
+end to end. R16 grades it three ways, all against a real
+PostgreSQL 16 server:
+
+- **Full-suite parity** (`tests/pg_parity.py`). With
+  `AML_TEST_DATABASE_URL` set, conftest swaps every store
+  construction in the suite — after collection, so no test file
+  changes — for a real `SqlCaseStore` over its own freshly
+  migrated Postgres schema, and `SqlCaseStore.sqlite(path)` for a
+  Postgres schema keyed by that path (reopen tests keep their
+  meaning). The whole suite then runs on the production adapter:
+  389 passed, the same count as the default profile. The two
+  tests that tamper with evidence through the in-memory double's
+  internals do the same tampering as SQL UPDATE/DELETE through a
+  live view the parity store exposes — an attacker with database
+  access is the same attacker in both profiles.
+- **Migrations on Postgres, graded directly**
+  (`tests/test_postgres_profile.py`): on an empty database the
+  runner applies 0001–0011 in order and a re-run applies nothing;
+  `SqlCaseStore.postgres` — the construction production wiring
+  uses — persists a case across connections. Parity found two
+  genuine defects here, both fixed at the owning layer: the
+  migration runner read its ledger with tuple indexing, which a
+  psycopg dict-row connection (what `SqlCaseStore.postgres`
+  builds) raises on — a migrated database could not be reopened;
+  and migrations 0008–0011 declared payload columns `JSONB`,
+  drifting from the store's JSON-text contract (0001–0007), so
+  psycopg handed back parsed objects where every reader expects
+  the stored text. The columns are `TEXT` now, both dialects
+  alike.
+- **The production smoke** (`scripts/prod_smoke.py`): boots the
+  real app under uvicorn with `DATABASE_URL` at a fresh, empty
+  database and walks the seeded structuring case over HTTP —
+  intake, pinned screening, typologies, investigation, escalate,
+  draft + verify, dual-control approval, seal, export, offline
+  export verification, and a sealed-mutation refusal — asserting
+  state at each of the 20 steps, then drops its database. The
+  eval gate runs all three legs as Scenario 19 when a server is
+  provided (`AML_EVAL_DATABASE_URL`), and counts the skip when
+  none is — the zero-tolerance counters are `pg_migration_failures`,
+  `prod_smoke_step_failures`, and `pg_suite_parity_gap`.
+
+The deployment artefacts were already the production shape —
+compose runs `pgvector/pgvector:pg16` with the app wired by
+`DATABASE_URL` and SeaweedFS as the S3 evidence store — so R16
+changed no compose topology; it verified the profile the compose
+stack selects. One boundary is stated plainly: the Docker image
+build itself was not run in the build sandbox (no Docker daemon
+there); the image and compose contracts are graded statically by
+`tests/test_docker_contract.py`, and the smoke proves the
+application the image ships, on the store the compose stack
+provisions.
+
 ## Round map (20)
 
 R1 core: case model, state machine, ports, intake, evidence store
