@@ -57,6 +57,19 @@ nobody's calendar is consulted:
 Clocks are derived views over stored facts (case record,
 disposition history, evidence chain) — no clock table exists, and
 a clock's state is never stored as free text someone could edit.
+
+R19 added the date-nonsense discipline. The clocks read their
+dates from artefacts — the alert's ``detected_on``, a
+disposition's ``decided_at``, a filing determination — and a
+hostile or broken feed can put those dates in impossible places:
+a detection date in the future, a closing disposition decided
+*before* the case was detected. The derivation now names each
+such impossibility as a clock **violation** on the case's clock
+view, and a predated closing disposition does not document a
+no-file ending: the filing clock stays live against its deadline
+rather than ending ``closed_no_file`` on a record that cannot
+describe this case. Nonsense surfaces as a named inconsistency,
+never as a verdict.
 """
 
 from __future__ import annotations
@@ -262,6 +275,12 @@ class RegulatoryClockService:
         if not records:
             return None
         latest = records[-1]
+        if latest.decided_at.date() < case.detected_on:
+            # R19: a closing disposition decided before the case
+            # was detected documents nothing — it cannot describe
+            # this case's investigation, so the no-file ending does
+            # not stand on it. _violations names it.
+            return None
         if latest.outcome not in (
             DispositionOutcome.CLOSE_NO_ACTION,
             DispositionOutcome.CLOSE_MONITOR,
@@ -284,11 +303,52 @@ class RegulatoryClockService:
             return None
         return latest
 
-    def _violations(self, case: Case) -> list[str]:
+    def _violations(self, case: Case, *, as_of: date) -> list[str]:
         """A terminal case with no disposition anywhere on its
         record is a clock violation. The gates make it
-        unreachable; the clock reports it rather than hiding it."""
+        unreachable; the clock reports it rather than hiding it.
+
+        R19 added the date-nonsense violations: the derivation
+        reads its dates from artefacts a feed or an import
+        supplies, and impossible dates — a detection in the
+        future, a disposition or filing determination decided
+        before the case it answers was detected — are named here
+        instead of flowing silently into deadline arithmetic."""
         violations: list[str] = []
+        if case.detected_on > as_of:
+            violations.append(
+                "detection_date_in_future: the case's detection "
+                f"date {case.detected_on.isoformat()} is after "
+                f"the as-of date {as_of.isoformat()}; every "
+                "deadline on this view is computed from a date "
+                "that has not happened, and the detection date "
+                "on the alert payload is wrong"
+            )
+        for record in self._dispositions.list_dispositions(case.case_id):
+            if record.decided_at.date() < case.detected_on:
+                violations.append(
+                    "disposition_predates_detection: disposition "
+                    f"{record.disposition_id} was decided "
+                    f"{record.decided_at.date().isoformat()}, "
+                    "before the case's detection date "
+                    f"{case.detected_on.isoformat()}; a decision "
+                    "cannot predate the activity it decides, so "
+                    "the record documents nothing"
+                )
+        link = self.continuing_link_for(case.case_id)
+        if link is not None:
+            prior = self._store.get_case(link.prior_case_id)
+            if prior is not None and (
+                link.determination_on < prior.detected_on
+            ):
+                violations.append(
+                    "determination_predates_detection: the "
+                    "continuing-activity clock's determination "
+                    f"date {link.determination_on.isoformat()} "
+                    "predates the prior case's detection date "
+                    f"{prior.detected_on.isoformat()}; the "
+                    "prior filing's recorded dates are wrong"
+                )
         if case.status in TERMINAL_STATUSES:
             documented = (
                 case.disposition is not None
@@ -596,7 +656,7 @@ class RegulatoryClockService:
             continuing_activity=self.continuing_clock(case, as_of=as_of),
             continuing_history=self.continuing_cycles(case, as_of=as_of),
             escalations=self.recorded_escalations(case_id),
-            violations=self._violations(case),
+            violations=self._violations(case, as_of=as_of),
         )
 
     # -- the continuing-activity trigger (intake) -------------------------
