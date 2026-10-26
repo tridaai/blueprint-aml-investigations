@@ -2402,3 +2402,414 @@ class ModelBudgetEvent(BaseModel):
         "item holding this event on the case's chain, when the "
         "evidence service was wired to record it there.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Management reporting (R17): derived read-models — Law 8's payoff
+# ---------------------------------------------------------------------------
+#
+# Every model below is a DERIVED view, computed in code from stored
+# artefacts at a named ``as_of`` — the same discipline as the clocks
+# (R8) and the profile views (R11), except that a report is never
+# stored: rebuilding it over the same artefacts at the same
+# ``as_of`` returns the same content, and its ``pack_id`` is a hash
+# of that content, so a pack can be pinned and re-checked without
+# a table. Each section names the sources its figures were read
+# from; a figure with no stated source does not appear.
+
+
+class AgeingRow(BaseModel):
+    """Open-case ageing for one grouping key (a case status, a
+    monitoring rule, a severity): how many cases stand open, their
+    ages spread over the pack's buckets, and the oldest age."""
+
+    key: str
+    open_cases: int = 0
+    buckets: dict[str, int] = Field(
+        default_factory=dict,
+        description="Age bucket -> open case count. Every bucket "
+        "of the pack's set is present, zero-filled.",
+    )
+    oldest_age_days: int | None = None
+    median_age_days: float | None = None
+
+
+class OldestCase(BaseModel):
+    """One row of the oldest-open-cases list."""
+
+    case_id: str
+    customer_id: str
+    status: CaseStatus
+    rule_id: str = Field(description="The monitoring rule (alert type).")
+    severity: AlertSeverity
+    detected_on: date
+    age_days: int
+    assigned_analyst: str | None = None
+
+
+class WaitingEntry(BaseModel):
+    """A case standing in a human's queue: a pending_confirmation
+    case waits on a second person (an L2 reviewer who is not the
+    dispositioning analyst); a sar_pending case waits on drafting,
+    verification, or the dual-control approval. Person-level
+    detail is limited to the actor ids the artefacts themselves
+    record — the report aggregates nothing about a person that
+    the record does not already carry."""
+
+    case_id: str
+    customer_id: str
+    stage: str = Field(
+        description="awaiting_confirmation | awaiting_draft | "
+        "awaiting_verification | awaiting_approval"
+    )
+    waiting_on_role: str = Field(
+        description="The coded role the wait stands with: "
+        "l2_reviewer for a confirmation; for SAR stages, the "
+        "drafting service or a second-person approver."
+    )
+    disposition_id: str | None = None
+    disposition_analyst_id: str | None = Field(
+        default=None,
+        description="The analyst whose recorded disposition "
+        "put the case in this queue.",
+    )
+    narrative_version: int | None = None
+    drafted_by: str | None = None
+    since: date = Field(
+        description="The date the wait began (the disposition's "
+        "decision date)."
+    )
+    days_waiting: int
+
+
+class QueueAgeingReport(BaseModel):
+    """The queue-ageing section: open cases by status x age
+    bucket, ageing by alert type and severity, the oldest cases,
+    and the two human-wait queues aged separately."""
+
+    as_of: date
+    open_cases: int = 0
+    age_buckets: list[str] = Field(
+        description="The bucket labels, in order — the axis every "
+        "row's ``buckets`` dict is keyed by."
+    )
+    by_status: list[AgeingRow] = Field(default_factory=list)
+    by_rule: list[AgeingRow] = Field(default_factory=list)
+    by_severity: list[AgeingRow] = Field(default_factory=list)
+    oldest: list[OldestCase] = Field(default_factory=list)
+    waiting_confirmation: list[WaitingEntry] = Field(default_factory=list)
+    waiting_sar: list[WaitingEntry] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
+
+
+class OverdueClockEntry(BaseModel):
+    """One clock standing overdue on the board."""
+
+    case_id: str
+    customer_id: str
+    clock_kind: str = Field(description="filing | continuing_activity")
+    deadline_kind: str
+    deadline: date
+    days_overdue: int = Field(ge=0)
+
+
+class DeadlinePerformanceEntry(BaseModel):
+    """One clock that reached a terminal state, and whether it
+    got there on time. A documented decision recorded after its
+    deadline is a LATE ending — the documentation stands, and so
+    does the lateness (the R15 rule, carried into reporting)."""
+
+    clock_kind: str = Field(description="filing | continuing_activity")
+    case_id: str
+    cycle: int | None = Field(
+        default=None,
+        description="Continuing-activity cycle number; None for "
+        "a filing clock.",
+    )
+    outcome: str = Field(description="satisfied | closed_no_file")
+    deadline: date
+    ended_on: date
+    on_time: bool
+    days_late: int = Field(ge=0)
+
+
+class DeadlinePerformance(BaseModel):
+    """Deadline performance over a window: of the clocks that
+    ended inside it, how many ended on time and how many late."""
+
+    window_start: date | None = None
+    window_end: date | None = None
+    clocks_ended: int = 0
+    on_time: int = 0
+    late: int = 0
+    entries: list[DeadlinePerformanceEntry] = Field(default_factory=list)
+
+
+class ClockBoardReport(BaseModel):
+    """The clock-board section: every case's clocks by state at
+    ``as_of`` (the continuing counts read each case's current
+    cycle), the overdue list, and deadline performance."""
+
+    as_of: date
+    filing_by_state: dict[str, int] = Field(
+        default_factory=dict,
+        description="ClockState value -> case count, zero-filled "
+        "for every state in the vocabulary.",
+    )
+    continuing_by_state: dict[str, int] = Field(default_factory=dict)
+    cases_with_continuing_clock: int = 0
+    overdue: list[OverdueClockEntry] = Field(default_factory=list)
+    performance: DeadlinePerformance = Field(
+        default_factory=DeadlinePerformance
+    )
+    sources: list[str] = Field(default_factory=list)
+
+
+class RecordRevisionRow(BaseModel):
+    """One case's investigation-record revision history, from the
+    first composed draft to the version the standing disposition
+    was decided on (summed over the stored per-version diffs)."""
+
+    case_id: str
+    first_version: int
+    decided_version: int | None = Field(
+        default=None,
+        description="The record version the case's latest "
+        "disposition cites; None when no disposition stands.",
+    )
+    latest_version: int
+    findings_added: int = 0
+    findings_removed: int = 0
+    findings_changed: int = 0
+    hypothesis_changed: bool = False
+
+
+class NarrativeRevisionRow(BaseModel):
+    """One case's SAR narrative drafting history: how many drafts
+    it took, which version was approved, and how far the approved
+    text stands from the first draft."""
+
+    case_id: str
+    drafts: int = 0
+    approved_version: int | None = None
+    approved_without_edit: bool | None = Field(
+        default=None,
+        description="True when the approved text is identical "
+        "to the first draft's text; None when nothing stands "
+        "approved.",
+    )
+    edit_distance: float | None = Field(
+        default=None,
+        description="1 - difflib SequenceMatcher ratio between "
+        "the first draft's rendered text and the approved "
+        "version's, 0..1. None when nothing stands approved.",
+    )
+    edit_band: str | None = Field(
+        default=None,
+        description="none | light | moderate | heavy — the "
+        "pack's distance bands, as data.",
+    )
+    rejections: int = 0
+
+
+class DecisionTimeRow(BaseModel):
+    """A decision-latency distribution for one actor at one gate:
+    counts plus median and p90 (nearest-rank), in hours. A
+    measurement of recorded timestamps, presented without any
+    performance label."""
+
+    actor_id: str
+    gate: str = Field(
+        description="disposition | confirmation | sar_approval"
+    )
+    decisions: int = 0
+    median_hours: float | None = None
+    p90_hours: float | None = None
+
+
+class ConfirmationRateRow(BaseModel):
+    """One dispositioning analyst's confirmation outcomes: how
+    many of their adverse closures required a second person, and
+    what that second person answered."""
+
+    analyst_id: str
+    dispositions: int = 0
+    requiring_confirmation: int = 0
+    confirmed: int = 0
+    declined: int = 0
+    awaiting: int = 0
+    confirmation_rate: float | None = Field(
+        default=None,
+        description="confirmed / (confirmed + declined); None "
+        "when no confirmation has been decided either way.",
+    )
+
+
+class RubberStampReport(BaseModel):
+    """The rubber-stamp section (Law 8): draft-vs-final
+    measurement across the three artefact families, plus the
+    confirmation patterns and decision-latency distributions.
+    Measurements only — the section states what it measures and
+    what it cannot; it scores nobody."""
+
+    as_of: date
+    # Investigation records: first draft -> decided version.
+    record_cases: int = 0
+    record_cases_decided: int = 0
+    decided_on_first_draft: int = 0
+    decided_on_revised_record: int = 0
+    record_transitions: int = 0
+    findings_added: int = 0
+    findings_removed: int = 0
+    findings_changed: int = 0
+    hypothesis_changes: int = 0
+    record_rows: list[RecordRevisionRow] = Field(default_factory=list)
+    # SAR narratives: first draft -> approved version.
+    narrative_cases: int = 0
+    narrative_drafts: int = 0
+    narratives_approved: int = 0
+    approved_without_edit: int = 0
+    approved_after_redraft: int = 0
+    narrative_rejections: int = 0
+    edit_bands: dict[str, int] = Field(
+        default_factory=dict,
+        description="Edit band -> approved narratives, zero-filled.",
+    )
+    narrative_rows: list[NarrativeRevisionRow] = Field(default_factory=list)
+    # Disposition confirmations (dual control at the gate).
+    confirmations_required: int = 0
+    confirmations_confirmed: int = 0
+    confirmations_declined: int = 0
+    confirmations_awaiting: int = 0
+    confirmed_with_note: int = 0
+    confirmed_without_note: int = 0
+    confirmation_rates: list[ConfirmationRateRow] = Field(
+        default_factory=list
+    )
+    # Decision latencies at the three gates.
+    decision_times: list[DecisionTimeRow] = Field(default_factory=list)
+    measures: list[str] = Field(
+        default_factory=list,
+        description="What each metric measures, in words.",
+    )
+    cannot_measure: list[str] = Field(
+        default_factory=list,
+        description="What these records cannot show, in words.",
+    )
+    sources: list[str] = Field(default_factory=list)
+
+
+class TypologyOpsRow(BaseModel):
+    """Finding volume for one typology check under one rule-pack
+    version: runs of the pack, findings, and the cases they fell
+    on. A rate is findings per run of the pack, exact Decimal."""
+
+    typology_id: str
+    rule_pack_id: str
+    rule_pack_version: str
+    pack_runs: int = 0
+    findings: int = 0
+    cases_with_findings: int = 0
+    findings_per_run: str = Field(
+        description="Exact Decimal string, 4dp."
+    )
+
+
+class ScreeningOpsRow(BaseModel):
+    """Screening outcomes against one list version: hits by
+    standing, with the namesake clearances (a name match a
+    contradicting date of birth cleared) counted separately —
+    they are the false-positive shape this system exists to
+    record honestly."""
+
+    list_kind: str
+    snapshot_version: str
+    cases_screened: int = 0
+    hits: int = 0
+    open: int = 0
+    cleared: int = 0
+    namesake_cleared: int = 0
+    confirmed: int = 0
+
+
+class QuarantineOps(BaseModel):
+    """Quarantine volume (Law 7): records and pattern matches by
+    family and source kind, and how many records a named analyst
+    has reviewed (an audit act — reviewed content stays fenced)."""
+
+    available: bool = Field(
+        description="False when no quarantine service is wired "
+        "into the reporting stack; the section then carries no "
+        "figures rather than invented ones.",
+    )
+    records: int = 0
+    matches: int = 0
+    by_family: dict[str, int] = Field(default_factory=dict)
+    by_source_kind: dict[str, int] = Field(default_factory=dict)
+    flagged: int = 0
+    reviewed: int = 0
+
+
+class SpendRow(BaseModel):
+    """Model spend for one ledger key (a profile or a purpose)."""
+
+    key: str
+    calls: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: str = Field(
+        default="0", description="Exact Decimal string."
+    )
+
+
+class OpsReport(BaseModel):
+    """The operations section: typology and screening volume,
+    quarantine counts, the media band distribution, and model
+    spend from the priced ledger (R13)."""
+
+    as_of: date
+    typology: list[TypologyOpsRow] = Field(default_factory=list)
+    screening: list[ScreeningOpsRow] = Field(default_factory=list)
+    quarantine: QuarantineOps = Field(
+        default_factory=lambda: QuarantineOps(available=False)
+    )
+    media_by_band: dict[str, int] = Field(
+        default_factory=dict,
+        description="MediaBand value -> assessments, zero-filled.",
+    )
+    media_assessments: int = 0
+    model_calls: int = 0
+    model_tokens_in: int = 0
+    model_tokens_out: int = 0
+    model_cost_usd: str = "0"
+    model_by_profile: list[SpendRow] = Field(default_factory=list)
+    model_by_purpose: list[SpendRow] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
+
+
+class ReportPack(BaseModel):
+    """The full management report at an ``as_of``: the four
+    sections, the window the deadline-performance figures cover,
+    and the counts of the artefacts the pack was derived from —
+    every figure in it reproducible from those artefacts by the
+    derivations the sections name. ``pack_id`` is a content hash
+    (the derived-artefact discipline of R11, unstored like the
+    clocks): the same artefacts at the same ``as_of`` rebuild the
+    same pack, byte for byte."""
+
+    pack_id: str = Field(default_factory=lambda: _new_id("rep"))
+    report_version: str
+    as_of: date
+    window_start: date | None = None
+    window_end: date | None = None
+    inputs: dict[str, int] = Field(
+        default_factory=dict,
+        description="Artefact family -> records read, e.g. "
+        "cases, dispositions, narratives. The pack's stated "
+        "sources, counted.",
+    )
+    queue_ageing: QueueAgeingReport
+    clock_board: ClockBoardReport
+    rubber_stamp: RubberStampReport
+    ops: OpsReport
+    content_hash: str = ""
