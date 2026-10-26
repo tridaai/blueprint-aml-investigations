@@ -51,6 +51,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from .access import (
+    ACCESS_POLICY_VERSION,
+    ACCESS_ROLES,
+    CALLER_ID_HEADER,
+    CALLER_ROLE_HEADER,
+    AccessService,
+    CallerIdentity,
+    identity_for_actor,
+)
 from .approval import REJECTION_CODES, REJECTION_VOCABULARY_VERSION
 from .dispositions import (
     ANALYST_ROLES,
@@ -61,6 +70,7 @@ from .dispositions import (
 from .reviews import REVIEW_NO_FILE_CODES, REVIEW_VOCABULARY_VERSION
 
 from .errors import (
+    AccessDeniedError,
     AlertNotFoundError,
     AmlError,
     ApprovalRefusedError,
@@ -328,6 +338,17 @@ class QuarantineReviewRequest(BaseModel):
     note: str = ""
 
 
+class AssignmentRequest(BaseModel):
+    """Assign a case to a named analyst (R18). The actor is the
+    person making the assignment — a book role, or an L1 analyst
+    claiming an unassigned case for themselves. The act is
+    recorded on the case's evidence chain and audit log."""
+
+    assignee_id: str = Field(min_length=1)
+    actor_id: str = Field(min_length=1)
+    actor_role: str = Field(min_length=1)
+
+
 class MediaSearchRequest(BaseModel):
     """Search the adverse-media port for a case's subject (R12).
     ``as_of`` is the date article ages are computed at; omitted
@@ -350,6 +371,78 @@ def create_app(services: Services | None = None) -> FastAPI:
     )
     app.state.services = services
 
+    # --- access control (R18): one check module in front of ---
+    # --- case data, enforced here and in the CLI. -------------
+    # ``access`` is None on hand-built stacks (single-service
+    # unit fixtures); production wiring always builds it. The
+    # assignment / denials doors use ``access_service``, which
+    # exists on every stack — assignment is a recorded act, not
+    # a plain field write, wherever it happens.
+    access = services.access
+    access_service = access or AccessService(
+        services.store, evidence=services.evidence, seal_store=services.store
+    )
+
+    def _caller(
+        request: Request,
+        actor: str | None = None,
+        role: str | None = None,
+    ) -> CallerIdentity | None:
+        """The caller's identity. Asserted headers win (the
+        deployment's gateway asserts them; the console sends
+        them); otherwise the write's own named actor is the
+        caller; a read with neither has no identity."""
+        hid = request.headers.get(CALLER_ID_HEADER)
+        hrole = request.headers.get(CALLER_ROLE_HEADER)
+        if hid is not None or hrole is not None:
+            return identity_for_actor(hid or "", hrole)
+        return identity_for_actor(actor, role)
+
+    def _read(request: Request, case_id: str, family: str) -> None:
+        if access is not None:
+            access.check_read(_caller(request), case_id, family)
+
+    def _write(
+        request: Request,
+        case_id: str,
+        family: str,
+        actor: str | None = None,
+        role: str | None = None,
+        *,
+        derivation: bool = False,
+    ) -> None:
+        if access is not None:
+            access.check_write(
+                _caller(request, actor, role),
+                case_id,
+                family,
+                derivation=derivation,
+            )
+
+    def _door(
+        request: Request,
+        door: str,
+        actor: str | None = None,
+        role: str | None = None,
+    ) -> None:
+        """A non-case write door (intake, reference data, the
+        review tick). A door call carrying no identity at all is
+        the deployment's own feeder path and runs under system
+        scope — stated in access.py's policy, not discovered
+        here. Any asserted identity is checked as itself, so an
+        auditor's door write is refused readonly_role."""
+        if access is not None:
+            identity = _caller(request, actor, role)
+            if identity is None:
+                identity = CallerIdentity(
+                    person_id="system", role="system"
+                )
+            access.check_door_write(identity, door)
+
+    def _portfolio(request: Request, family: str) -> None:
+        if access is not None:
+            access.check_portfolio(_caller(request), family)
+
     @app.middleware("http")
     async def correlation(request: Request, call_next):
         request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
@@ -363,7 +456,27 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     @app.exception_handler(CaseNotFoundError)
     async def _case_not_found(_request: Request, exc: CaseNotFoundError):
-        return _error(404, f"case not found: {exc}")
+        # R18: the body names no id. A case the caller may not
+        # read and a case that does not exist return byte-identical
+        # responses — existence is not leaked by the refusal
+        # shape. (The denial audit event records the real target
+        # internally, for the auditor.)
+        return _error(404, "case not found")
+
+    @app.exception_handler(AccessDeniedError)
+    async def _access_denied(_request: Request, exc: AccessDeniedError):
+        # A refusal the caller is entitled to see: 403, the coded
+        # reason, and the family it names. (Out-of-scope case
+        # reads never reach here — they raise CaseNotFoundError,
+        # so existence is not leaked by a distinguishable shape.)
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": str(exc),
+                "code": exc.code,
+                "family": exc.family,
+            },
+        )
 
     @app.exception_handler(AlertNotFoundError)
     async def _alert_not_found(_request: Request, exc: AlertNotFoundError):
@@ -587,6 +700,11 @@ def create_app(services: Services | None = None) -> FastAPI:
                 ),
                 "file_continuing_version": RATIONALE_VOCABULARY_VERSION,
             },
+            "access": {
+                "version": ACCESS_POLICY_VERSION,
+                "roles": sorted(ACCESS_ROLES),
+                "identity_headers": [CALLER_ID_HEADER, CALLER_ROLE_HEADER],
+            },
         }
 
     @app.get("/alerts")
@@ -594,27 +712,73 @@ def create_app(services: Services | None = None) -> FastAPI:
         return [a.model_dump(mode="json") for a in services.alerts.list_alerts()]
 
     @app.post("/alerts/intake", status_code=201)
-    async def intake(payload: IntakeRequest):
+    async def intake(request: Request, payload: IntakeRequest):
+        _door(request, "intake", actor=payload.actor)
         case = services.intake.open_case(payload.alert_id, actor=payload.actor)
         return case.model_dump(mode="json")
 
     @app.get("/cases")
-    async def list_cases(status: str | None = None):
-        return [
-            c.model_dump(mode="json") for c in services.store.list_cases(status)
-        ]
+    async def list_cases(request: Request, status: str | None = None):
+        cases = services.store.list_cases(status)
+        if access is not None:
+            # The caller's queue: out-of-scope cases simply do
+            # not appear (R18).
+            cases = access.filter_cases(_caller(request), cases)
+        return [c.model_dump(mode="json") for c in cases]
 
     @app.get("/cases/{case_id}")
-    async def get_case(case_id: str):
+    async def get_case(request: Request, case_id: str):
         case_id_var.set(case_id)
+        _read(request, case_id, "case")
         case = services.store.get_case(case_id)
         if case is None:
             raise CaseNotFoundError(case_id)
         return case.model_dump(mode="json")
 
-    @app.post("/cases/{case_id}/transitions")
-    async def transition(case_id: str, payload: TransitionRequest):
+    @app.post("/cases/{case_id}/assignment", status_code=201)
+    async def assign_case(
+        request: Request, case_id: str, payload: AssignmentRequest
+    ):
+        """Assign a case to a named analyst (R18): a recorded
+        act — a ``case_assignment`` item on the evidence chain
+        plus an audit event. Book roles assign freely; an L1
+        analyst may only claim an unassigned case for
+        themselves."""
         case_id_var.set(case_id)
+        actor = _caller(request, payload.actor_id, payload.actor_role)
+        if actor is None:
+            raise AccessDeniedError(
+                "role_not_permitted",
+                "assignment",
+                "access denied (role_not_permitted): an "
+                "assignment requires a named actor with a "
+                "recognised role",
+            )
+        case, seq = access_service.assign_case(
+            case_id, assignee_id=payload.assignee_id, actor=actor
+        )
+        return {
+            "case": case.model_dump(mode="json"),
+            "evidence_seq": seq,
+        }
+
+    @app.get("/access/denials")
+    async def list_denials(request: Request):
+        """Every recorded access denial (R18) — who was refused,
+        which case or door, which family, which coded reason.
+        Held by the officer, the auditor, and the system."""
+        if access is not None:
+            access.check_portfolio(_caller(request), "denials")
+        return [
+            e.model_dump(mode="json") for e in access_service.denials()
+        ]
+
+    @app.post("/cases/{case_id}/transitions")
+    async def transition(
+        request: Request, case_id: str, payload: TransitionRequest
+    ):
+        case_id_var.set(case_id)
+        _write(request, case_id, "case", actor=payload.actor)
         case = services.workflow.transition(
             case_id,
             payload.target,
@@ -624,8 +788,11 @@ def create_app(services: Services | None = None) -> FastAPI:
         return case.model_dump(mode="json")
 
     @app.post("/cases/{case_id}/evidence", status_code=201)
-    async def add_evidence(case_id: str, payload: EvidenceRequest):
+    async def add_evidence(
+        request: Request, case_id: str, payload: EvidenceRequest
+    ):
         case_id_var.set(case_id)
+        _write(request, case_id, "evidence", actor=payload.captured_by)
         try:
             content = base64.b64decode(payload.content_base64, validate=True)
         except binascii.Error:
@@ -642,17 +809,20 @@ def create_app(services: Services | None = None) -> FastAPI:
         return item.model_dump(mode="json")
 
     @app.get("/cases/{case_id}/evidence")
-    async def list_evidence(case_id: str):
+    async def list_evidence(request: Request, case_id: str):
+        _read(request, case_id, "evidence")
         items = services.evidence.list_items(case_id)
         return [i.model_dump(mode="json") for i in items]
 
     @app.get("/cases/{case_id}/evidence/verify")
-    async def verify_evidence(case_id: str):
+    async def verify_evidence(request: Request, case_id: str):
+        _read(request, case_id, "evidence")
         intact = services.evidence.verify_chain(case_id)
         return {"case_id": case_id, "chain_intact": intact}
 
     @app.get("/cases/{case_id}/audit")
-    async def list_audit(case_id: str):
+    async def list_audit(request: Request, case_id: str):
+        _read(request, case_id, "audit")
         if services.store.get_case(case_id) is None:
             raise CaseNotFoundError(case_id)
         return [
@@ -661,12 +831,14 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     # --- screening (R2, Law 3) --------------------------------------
     @app.post("/screening/snapshots", status_code=201)
-    async def ingest_snapshot(payload: ListSnapshot):
+    async def ingest_snapshot(request: Request, payload: ListSnapshot):
+        _door(request, "reference_data")
         snapshot = services.screening.ingest_snapshot(payload)
         return snapshot.model_dump(mode="json")
 
     @app.post("/screening/snapshots/ingest-feed", status_code=201)
-    async def ingest_feed():
+    async def ingest_feed(request: Request):
+        _door(request, "reference_data")
         snapshots = services.screening.ingest_from_source(services.screening_feed)
         return [s.model_dump(mode="json") for s in snapshots]
 
@@ -678,8 +850,11 @@ def create_app(services: Services | None = None) -> FastAPI:
         ]
 
     @app.post("/cases/{case_id}/screening", status_code=201)
-    async def screen_case(case_id: str, payload: ScreenRequest):
+    async def screen_case(
+        request: Request, case_id: str, payload: ScreenRequest
+    ):
         case_id_var.set(case_id)
+        _write(request, case_id, "screening", actor=payload.actor)
         run = services.screening.screen_case(
             case_id,
             payload.pins,
@@ -697,7 +872,8 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/cases/{case_id}/screening")
-    async def get_screening(case_id: str):
+    async def get_screening(request: Request, case_id: str):
+        _read(request, case_id, "screening")
         case = services.store.get_case(case_id)
         if case is None:
             raise CaseNotFoundError(case_id)
@@ -718,7 +894,17 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.post("/screening/hits/{hit_id}/status")
-    async def set_hit_status(hit_id: str, payload: HitStatusRequest):
+    async def set_hit_status(
+        request: Request, hit_id: str, payload: HitStatusRequest
+    ):
+        if access is not None:
+            hit = services.store.get_hit(hit_id)
+            if hit is not None:
+                access.check_write(
+                    _caller(request, payload.actor),
+                    hit.case_id,
+                    "screening",
+                )
         hit = services.screening.set_hit_status(
             hit_id,
             payload.status,
@@ -729,12 +915,14 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     # --- typologies (R3, Law 4) -------------------------------------
     @app.post("/typologies/rule-packs", status_code=201)
-    async def register_rule_pack(payload: RulePack):
+    async def register_rule_pack(request: Request, payload: RulePack):
+        _door(request, "reference_data")
         pack = services.typologies.register_rule_pack(payload)
         return pack.model_dump(mode="json")
 
     @app.post("/typologies/rule-packs/register-feed", status_code=201)
-    async def register_rule_pack_feed():
+    async def register_rule_pack_feed(request: Request):
+        _door(request, "reference_data")
         packs = services.typologies.register_from_source(services.rule_pack_feed)
         return [p.model_dump(mode="json") for p in packs]
 
@@ -745,16 +933,22 @@ def create_app(services: Services | None = None) -> FastAPI:
         ]
 
     @app.post("/cases/{case_id}/transactions/ingest-feed", status_code=201)
-    async def ingest_transactions_feed(case_id: str, actor: str = "core-banking-feed"):
+    async def ingest_transactions_feed(
+        request: Request, case_id: str, actor: str = "core-banking-feed"
+    ):
         case_id_var.set(case_id)
+        _write(request, case_id, "transactions", actor=actor)
         batch = services.typologies.ingest_from_source(
             case_id, services.transactions, actor=actor
         )
         return batch.model_dump(mode="json")
 
     @app.post("/cases/{case_id}/transactions", status_code=201)
-    async def ingest_transactions(case_id: str, payload: TransactionBatchRequest):
+    async def ingest_transactions(
+        request: Request, case_id: str, payload: TransactionBatchRequest
+    ):
         case_id_var.set(case_id)
+        _write(request, case_id, "transactions", actor=payload.actor)
         batch = services.typologies.ingest_transactions(
             case_id,
             payload.transactions,
@@ -764,7 +958,8 @@ def create_app(services: Services | None = None) -> FastAPI:
         return batch.model_dump(mode="json")
 
     @app.get("/cases/{case_id}/transactions")
-    async def list_transactions(case_id: str):
+    async def list_transactions(request: Request, case_id: str):
+        _read(request, case_id, "transactions")
         if services.store.get_case(case_id) is None:
             raise CaseNotFoundError(case_id)
         return {
@@ -780,8 +975,11 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.post("/cases/{case_id}/typologies/run", status_code=201)
-    async def run_typologies(case_id: str, payload: TypologyRunRequest):
+    async def run_typologies(
+        request: Request, case_id: str, payload: TypologyRunRequest
+    ):
         case_id_var.set(case_id)
+        _write(request, case_id, "typologies", actor=payload.actor)
         run = services.typologies.run_typologies(
             case_id, payload.pack_id, payload.version, actor=payload.actor
         )
@@ -792,7 +990,8 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/cases/{case_id}/typologies")
-    async def get_typologies(case_id: str):
+    async def get_typologies(request: Request, case_id: str):
+        _read(request, case_id, "typologies")
         if services.store.get_case(case_id) is None:
             raise CaseNotFoundError(case_id)
         return {
@@ -809,15 +1008,19 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     # --- investigations (R4) -----------------------------------------
     @app.post("/cases/{case_id}/investigation/run", status_code=201)
-    async def run_investigation(case_id: str, payload: InvestigationRunRequest):
+    async def run_investigation(
+        request: Request, case_id: str, payload: InvestigationRunRequest
+    ):
         case_id_var.set(case_id)
+        _write(request, case_id, "records", actor=payload.actor)
         record = services.investigations.run_investigation(
             case_id, actor=payload.actor, profile=payload.profile
         )
         return record.model_dump(mode="json")
 
     @app.get("/cases/{case_id}/investigation")
-    async def get_investigation(case_id: str):
+    async def get_investigation(request: Request, case_id: str):
+        _read(request, case_id, "records")
         if services.store.get_case(case_id) is None:
             raise CaseNotFoundError(case_id)
         current = services.investigations.current_record(case_id)
@@ -834,8 +1037,17 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     # --- dispositions (R5): the analyst gate -------------------------
     @app.post("/cases/{case_id}/disposition", status_code=201)
-    async def record_disposition(case_id: str, payload: DispositionRequest):
+    async def record_disposition(
+        request: Request, case_id: str, payload: DispositionRequest
+    ):
         case_id_var.set(case_id)
+        _write(
+            request,
+            case_id,
+            "dispositions",
+            actor=payload.analyst_id,
+            role=payload.analyst_role,
+        )
         record = services.dispositions.record_disposition(
             case_id,
             analyst_id=payload.analyst_id,
@@ -854,8 +1066,17 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.post("/cases/{case_id}/disposition/confirmation", status_code=201)
-    async def confirm_disposition(case_id: str, payload: ConfirmationRequest):
+    async def confirm_disposition(
+        request: Request, case_id: str, payload: ConfirmationRequest
+    ):
         case_id_var.set(case_id)
+        _write(
+            request,
+            case_id,
+            "dispositions",
+            actor=payload.confirmer_id,
+            role=payload.confirmer_role,
+        )
         confirmation = services.dispositions.confirm_disposition(
             case_id,
             confirmer_id=payload.confirmer_id,
@@ -869,7 +1090,8 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/cases/{case_id}/dispositions")
-    async def get_dispositions(case_id: str):
+    async def get_dispositions(request: Request, case_id: str):
+        _read(request, case_id, "dispositions")
         if services.store.get_case(case_id) is None:
             raise CaseNotFoundError(case_id)
         return {
@@ -886,8 +1108,11 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     # --- SAR narratives (R6): drafting + the citation verifier ----
     @app.post("/cases/{case_id}/sar/draft", status_code=201)
-    async def draft_sar(case_id: str, payload: SarDraftRequest):
+    async def draft_sar(
+        request: Request, case_id: str, payload: SarDraftRequest
+    ):
         case_id_var.set(case_id)
+        _write(request, case_id, "narratives", actor=payload.actor)
         narrative, verification = services.sar.draft_narrative(
             case_id, actor=payload.actor, profile=payload.profile
         )
@@ -898,7 +1123,8 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/cases/{case_id}/sar")
-    async def get_sar(case_id: str):
+    async def get_sar(request: Request, case_id: str):
+        _read(request, case_id, "narratives")
         if services.store.get_case(case_id) is None:
             raise CaseNotFoundError(case_id)
         current = services.sar.current_narrative(case_id)
@@ -914,8 +1140,12 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.post("/cases/{case_id}/sar/verify", status_code=201)
-    async def verify_sar(case_id: str):
+    async def verify_sar(request: Request, case_id: str):
         case_id_var.set(case_id)
+        # The verifier re-derives from stored facts; a caller
+        # with no headers triggers it under system scope (a
+        # derivation, never an analyst act).
+        _write(request, case_id, "narratives", derivation=True)
         verification = services.sar.verify_narrative(case_id)
         current = services.sar.current_narrative(case_id)
         return {
@@ -926,7 +1156,8 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/cases/{case_id}/sar/verification")
-    async def get_sar_verification(case_id: str):
+    async def get_sar_verification(request: Request, case_id: str):
+        _read(request, case_id, "narratives")
         if services.store.get_case(case_id) is None:
             raise CaseNotFoundError(case_id)
         current = services.sar.current_narrative(case_id)
@@ -948,8 +1179,17 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     # --- Dual-control approval (R7): the second person's decision --
     @app.post("/cases/{case_id}/sar/approve", status_code=201)
-    async def approve_sar(case_id: str, payload: SarApprovalRequest):
+    async def approve_sar(
+        request: Request, case_id: str, payload: SarApprovalRequest
+    ):
         case_id_var.set(case_id)
+        _write(
+            request,
+            case_id,
+            "approvals",
+            actor=payload.approver_id,
+            role=payload.approver_role,
+        )
         approval = services.approvals.decide_narrative(
             case_id,
             approver_id=payload.approver_id,
@@ -964,7 +1204,8 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/cases/{case_id}/sar/approval")
-    async def get_sar_approval(case_id: str):
+    async def get_sar_approval(request: Request, case_id: str):
+        _read(request, case_id, "approvals")
         if services.store.get_case(case_id) is None:
             raise CaseNotFoundError(case_id)
         current = services.approvals.current_approval(case_id)
@@ -983,8 +1224,17 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     # --- Sealing, legal hold, export (R7): the custody layer -------
     @app.post("/cases/{case_id}/seal", status_code=201)
-    async def seal_case(case_id: str, payload: SealRequest):
+    async def seal_case(
+        request: Request, case_id: str, payload: SealRequest
+    ):
         case_id_var.set(case_id)
+        _write(
+            request,
+            case_id,
+            "custody",
+            actor=payload.officer_id,
+            role=payload.officer_role,
+        )
         seal = services.sealing.seal_case(
             case_id,
             officer_id=payload.officer_id,
@@ -994,8 +1244,17 @@ def create_app(services: Services | None = None) -> FastAPI:
         return {"seal": services.sealing.view(seal)}
 
     @app.post("/cases/{case_id}/unseal", status_code=201)
-    async def unseal_case(case_id: str, payload: UnsealRequest):
+    async def unseal_case(
+        request: Request, case_id: str, payload: UnsealRequest
+    ):
         case_id_var.set(case_id)
+        _write(
+            request,
+            case_id,
+            "custody",
+            actor=payload.officer_id,
+            role=payload.officer_role,
+        )
         unseal = services.sealing.unseal_case(
             case_id,
             officer_id=payload.officer_id,
@@ -1006,12 +1265,22 @@ def create_app(services: Services | None = None) -> FastAPI:
         return {"unseal": unseal.model_dump(mode="json")}
 
     @app.get("/cases/{case_id}/seal")
-    async def get_seal(case_id: str):
+    async def get_seal(request: Request, case_id: str):
+        _read(request, case_id, "custody")
         return services.sealing.case_file_view(case_id)
 
     @app.post("/cases/{case_id}/legal-hold", status_code=201)
-    async def place_hold(case_id: str, payload: HoldRequest):
+    async def place_hold(
+        request: Request, case_id: str, payload: HoldRequest
+    ):
         case_id_var.set(case_id)
+        _write(
+            request,
+            case_id,
+            "custody",
+            actor=payload.officer_id,
+            role=payload.officer_role,
+        )
         event = services.sealing.place_hold(
             case_id,
             officer_id=payload.officer_id,
@@ -1022,8 +1291,17 @@ def create_app(services: Services | None = None) -> FastAPI:
         return {"legal_hold": event.model_dump(mode="json")}
 
     @app.post("/cases/{case_id}/legal-hold/release", status_code=201)
-    async def release_hold(case_id: str, payload: HoldRequest):
+    async def release_hold(
+        request: Request, case_id: str, payload: HoldRequest
+    ):
         case_id_var.set(case_id)
+        _write(
+            request,
+            case_id,
+            "custody",
+            actor=payload.officer_id,
+            role=payload.officer_role,
+        )
         event = services.sealing.release_hold(
             case_id,
             officer_id=payload.officer_id,
@@ -1034,7 +1312,8 @@ def create_app(services: Services | None = None) -> FastAPI:
         return {"legal_hold": event.model_dump(mode="json")}
 
     @app.get("/cases/{case_id}/legal-hold")
-    async def get_hold(case_id: str):
+    async def get_hold(request: Request, case_id: str):
+        _read(request, case_id, "custody")
         if services.store.get_case(case_id) is None:
             raise CaseNotFoundError(case_id)
         return {
@@ -1047,7 +1326,11 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/cases/{case_id}/export")
-    async def export_case(case_id: str):
+    async def export_case(request: Request, case_id: str):
+        # R18: the export package leaves the building only in a
+        # BSA officer's hands — the policy grants that family to
+        # the officer role alone.
+        _read(request, case_id, "export")
         package = services.sealing.export_case_file(case_id)
         return JSONResponse(
             content=package,
@@ -1065,20 +1348,28 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     # --- Regulatory clocks (R8): Law 6, computed in code -----------
     @app.get("/cases/{case_id}/clock")
-    async def get_case_clock(case_id: str, as_of: date | None = None):
+    async def get_case_clock(
+        request: Request, case_id: str, as_of: date | None = None
+    ):
         """A case's clocks at ``as_of`` (today when omitted) — a
         pure read: the derivation writes nothing."""
+        _read(request, case_id, "clocks")
         view = services.clocks.case_clocks(
             case_id, as_of=as_of or date.today()
         )
         return view.model_dump(mode="json")
 
     @app.post("/cases/{case_id}/clock/refresh", status_code=201)
-    async def refresh_case_clock(case_id: str, payload: ClockRefreshRequest):
+    async def refresh_case_clock(
+        request: Request, case_id: str, payload: ClockRefreshRequest
+    ):
         """The scheduler tick for one case: record any clock
         crossing the ``as_of`` reveals (idempotent — a crossing
         already on the chain is never recorded twice)."""
         as_of = payload.as_of or date.today()
+        # A clock is a derivation: header-less triggers run under
+        # system scope, never as an analyst.
+        _write(request, case_id, "clocks", derivation=True)
         events = services.clocks.refresh_escalations(case_id, as_of=as_of)
         return {
             "case_id": case_id,
@@ -1090,39 +1381,47 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/clocks/board")
-    async def clock_board(as_of: date | None = None):
+    async def clock_board(request: Request, as_of: date | None = None):
         """Every case's clocks at ``as_of``, most urgent first.
         Reading the board runs the tick first: any crossing it
-        reveals is recorded on the case's chain."""
+        reveals is recorded on the case's chain. R18: the board
+        the caller sees is their book — an L1 analyst's board
+        holds only cases in their scope."""
         as_of = as_of or date.today()
         services.clocks.refresh_all_escalations(as_of=as_of)
-        return [
-            view.model_dump(mode="json")
-            for view in services.clocks.clock_board(as_of=as_of)
-        ]
+        views = services.clocks.clock_board(as_of=as_of)
+        if access is not None:
+            visible = access.filter_case_ids(_caller(request), None)
+            views = [v for v in views if v.case_id in visible]
+        return [view.model_dump(mode="json") for view in views]
 
     @app.get("/queues/clock-escalations")
-    async def clock_escalation_queue(as_of: date | None = None):
+    async def clock_escalation_queue(
+        request: Request, as_of: date | None = None
+    ):
         """Clocks standing at due_soon / due / overdue at
         ``as_of`` — overdue first, each entry naming its
-        deadline. Reading the queue runs the tick first."""
+        deadline. Reading the queue runs the tick first. R18:
+        entries outside the caller's scope do not appear."""
         as_of = as_of or date.today()
         services.clocks.refresh_all_escalations(as_of=as_of)
-        return [
-            entry.model_dump(mode="json")
-            for entry in services.clocks.escalation_queue(as_of=as_of)
-        ]
+        entries = services.clocks.escalation_queue(as_of=as_of)
+        if access is not None:
+            visible = access.filter_case_ids(_caller(request), None)
+            entries = [e for e in entries if e.case_id in visible]
+        return [entry.model_dump(mode="json") for entry in entries]
 
     @app.post(
         "/cases/{case_id}/continuing-reviews", status_code=201
     )
     async def open_continuing_review(
-        case_id: str, payload: ReviewOpenRequest
+        request: Request, case_id: str, payload: ReviewOpenRequest
     ):
         """Open the current cycle's continuing-activity review
         (R9): the window's activity, assembled over the linked
         case's current investigation record and verified at the
         citation gate before it is stored."""
+        _write(request, case_id, "reviews", actor=payload.actor)
         review = services.reviews.open_review(case_id, actor=payload.actor)
         return {
             "review": services.reviews.review_view(review),
@@ -1130,10 +1429,11 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/cases/{case_id}/continuing-reviews")
-    async def list_continuing_reviews(case_id: str):
+    async def list_continuing_reviews(request: Request, case_id: str):
         """The case's reviews: the current cycle's operative
         review, the full per-cycle history, the recorded review
         dispositions, and the cycle clocks they answer."""
+        _read(request, case_id, "reviews")
         case = services.store.get_case(case_id)
         if case is None:
             raise CaseNotFoundError(case_id)
@@ -1153,7 +1453,10 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/cases/{case_id}/continuing-reviews/{review_id}")
-    async def get_continuing_review(case_id: str, review_id: str):
+    async def get_continuing_review(
+        request: Request, case_id: str, review_id: str
+    ):
+        _read(request, case_id, "reviews")
         return services.reviews.get_review_view(case_id, review_id)
 
     @app.post(
@@ -1161,13 +1464,23 @@ def create_app(services: Services | None = None) -> FastAPI:
         status_code=201,
     )
     async def disposition_continuing_review(
-        case_id: str, review_id: str, payload: ReviewDispositionRequest
+        request: Request,
+        case_id: str,
+        review_id: str,
+        payload: ReviewDispositionRequest,
     ):
         """Record the cycle's decision — the only act that
         answers the clock for the cycle. file_continuing mints an
         escalate_sar disposition through the gate and routes the
         case to sar_pending; no_file_this_cycle is documented by
         its coded rationale and starts the next cycle."""
+        _write(
+            request,
+            case_id,
+            "reviews",
+            actor=payload.analyst_id,
+            role=payload.analyst_role,
+        )
         disposition = services.reviews.record_review_disposition(
             case_id,
             review_id,
@@ -1184,16 +1497,46 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/customers/{customer_id}/continuing-reviews")
-    async def customer_continuing_reviews(customer_id: str):
+    async def customer_continuing_reviews(
+        request: Request, customer_id: str
+    ):
         """The customer's continuing-activity history: every
-        review and review disposition across their cases."""
-        return services.reviews.history_for_customer(customer_id)
+        review and review disposition across their cases. R18:
+        visible only to a caller who can read at least one of
+        the customer's cases; the history itself is drawn from
+        those cases alone."""
+        if access is not None:
+            visible_ids = {
+                c.case_id
+                for c in access.check_customer_read(
+                    _caller(request), customer_id
+                )
+            }
+        history = services.reviews.history_for_customer(customer_id)
+        if access is not None:
+            history = {
+                **history,
+                "reviews": [
+                    r
+                    for r in history["reviews"]
+                    if r.get("case_id") in visible_ids
+                ],
+                "dispositions": [
+                    d
+                    for d in history["dispositions"]
+                    if d.get("case_id") in visible_ids
+                ],
+            }
+        return history
 
     @app.post("/continuing-reviews/open-due", status_code=201)
-    async def open_due_reviews(payload: ReviewTickRequest):
+    async def open_due_reviews(
+        request: Request, payload: ReviewTickRequest
+    ):
         """The scheduler tick: open a review for every case whose
         current cycle's review deadline has arrived and no review
         stands for the cycle yet."""
+        _door(request, "review_tick", actor=payload.actor)
         opened = services.reviews.open_due_reviews(
             as_of=payload.as_of or date.today(), actor=payload.actor
         )
@@ -1204,20 +1547,23 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/queues/pending-confirmation")
-    async def pending_confirmation_queue():
+    async def pending_confirmation_queue(request: Request):
+        _portfolio(request, "confirmation_queue")
         return services.dispositions.confirmation_queue()
 
     @app.get("/queues/escalations")
-    async def escalation_queue():
+    async def escalation_queue(request: Request):
+        _portfolio(request, "escalation_queue")
         return services.dispositions.escalation_queue()
 
     # -- quarantine surface (R10, Law 7) -----------------------------
 
     @app.get("/cases/{case_id}/quarantine")
-    async def case_quarantine(case_id: str):
+    async def case_quarantine(request: Request, case_id: str):
         """One case's quarantine records with their derived review
         status: the item quarantined, the pattern matched, the
         span — the injection attempt as a case event."""
+        _read(request, case_id, "quarantine")
         records = services.quarantine.records_for(case_id)
         return {
             "case_id": case_id,
@@ -1227,24 +1573,30 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/queues/quarantine")
-    async def quarantine_queue():
+    async def quarantine_queue(request: Request):
         """Every quarantine record across every case — the
-        analyst's review work list."""
-        return [
-            entry.model_dump(mode="json")
-            for entry in services.quarantine.queue()
-        ]
+        analyst's review work list. R18: entries are scoped to
+        the caller's book, like every other queue."""
+        entries = services.quarantine.queue()
+        if access is not None:
+            visible = access.filter_case_ids(_caller(request), None)
+            entries = [e for e in entries if e.case_id in visible]
+        return [entry.model_dump(mode="json") for entry in entries]
 
     @app.post(
         "/cases/{case_id}/quarantine/{quarantine_seq}/review",
         status_code=201,
     )
     async def review_quarantine(
-        case_id: str, quarantine_seq: int, payload: QuarantineReviewRequest
+        request: Request,
+        case_id: str,
+        quarantine_seq: int,
+        payload: QuarantineReviewRequest,
     ):
         """Record a named analyst's review of one quarantine
         record. Review is an audit act — the content stays fenced
         everywhere it is consumed, permanently."""
+        _write(request, case_id, "quarantine", actor=payload.reviewer)
         review = services.quarantine.mark_reviewed(
             case_id,
             quarantine_seq,
@@ -1257,11 +1609,17 @@ def create_app(services: Services | None = None) -> FastAPI:
 
     @app.post("/customers/{customer_id}/profile", status_code=201)
     async def assemble_profile(
-        customer_id: str, payload: ProfileAssembleRequest
+        request: Request,
+        customer_id: str,
+        payload: ProfileAssembleRequest,
     ):
         """Assemble the customer's KYC profile view from stored
         artefacts. Rebuilding over unchanged inputs returns the
         stored view; changed inputs append the next version."""
+        if access is not None:
+            access.check_customer_write(
+                _caller(request, payload.actor), customer_id
+            )
         view = services.profiles.assemble_profile(
             customer_id,
             as_of=payload.as_of or date.today(),
@@ -1270,36 +1628,45 @@ def create_app(services: Services | None = None) -> FastAPI:
         return view.model_dump(mode="json")
 
     @app.get("/customers/{customer_id}/profile")
-    async def get_profile(customer_id: str):
+    async def get_profile(request: Request, customer_id: str):
         """The customer's latest assembled profile view."""
+        if access is not None:
+            access.check_customer_read(_caller(request), customer_id)
         return services.profiles.latest_view(customer_id).model_dump(
             mode="json"
         )
 
     @app.get("/customers/{customer_id}/profile/history")
-    async def profile_history(customer_id: str):
+    async def profile_history(request: Request, customer_id: str):
         """Every stored version of the customer's profile view,
         oldest first — the assembly history, append-only."""
+        if access is not None:
+            access.check_customer_read(_caller(request), customer_id)
         return [
             v.model_dump(mode="json")
             for v in services.profiles.view_history(customer_id)
         ]
 
     @app.get("/cases/{case_id}/profile")
-    async def case_profile(case_id: str):
+    async def case_profile(request: Request, case_id: str):
         """The profile view for a case's customer — the read an
         analyst at the case starts from."""
         case_id_var.set(case_id)
+        _read(request, case_id, "profiles")
         return services.profiles.profile_for_case(case_id).model_dump(
             mode="json"
         )
 
     @app.get("/customers/{customer_id}/counterparties")
-    async def customer_counterparties(customer_id: str):
+    async def customer_counterparties(
+        request: Request, customer_id: str
+    ):
         """The customer's counterparties aggregated from stored
         transactions: Decimal totals, first/last seen, screening
         state, and the customers each counterparty is shared
         with."""
+        if access is not None:
+            access.check_customer_read(_caller(request), customer_id)
         return [
             v.model_dump(mode="json")
             for v in services.profiles.counterparties_for_customer(
@@ -1308,16 +1675,22 @@ def create_app(services: Services | None = None) -> FastAPI:
         ]
 
     @app.get("/customers/{customer_id}/counterparties/{name}")
-    async def customer_counterparty(customer_id: str, name: str):
+    async def customer_counterparty(
+        request: Request, customer_id: str, name: str
+    ):
         """One counterparty's view for one customer."""
+        if access is not None:
+            access.check_customer_read(_caller(request), customer_id)
         return services.profiles.counterparty_detail(
             customer_id, name
         ).model_dump(mode="json")
 
     @app.get("/counterparties/shared")
-    async def shared_counterparties():
+    async def shared_counterparties(request: Request):
         """Counterparties standing on more than one customer's
-        cases — the shared-counterparty network view."""
+        cases — the shared-counterparty network view. R18: a
+        portfolio surface — reviewer, officer, auditor, system."""
+        _portfolio(request, "shared_counterparties")
         return [
             s.model_dump(mode="json")
             for s in services.profiles.shared_counterparties()
@@ -1326,13 +1699,16 @@ def create_app(services: Services | None = None) -> FastAPI:
     # -- adverse-media surface (R12) -------------------------------
 
     @app.post("/cases/{case_id}/media/search", status_code=201)
-    async def search_media(case_id: str, payload: MediaSearchRequest):
+    async def search_media(
+        request: Request, case_id: str, payload: MediaSearchRequest
+    ):
         """Search the media port for the case's subject, ingest
         the candidate articles as evidence, and score each in
         code. Returns the case's assessments, new and already
         recorded alike. Assessments are findings — this search
         dispositions nothing and moves no case state."""
         case_id_var.set(case_id)
+        _write(request, case_id, "media", actor=payload.actor)
         results = services.media.search_case_media(
             case_id,
             actor=payload.actor,
@@ -1341,11 +1717,12 @@ def create_app(services: Services | None = None) -> FastAPI:
         return [a.model_dump(mode="json") for a in results]
 
     @app.get("/cases/{case_id}/media/assessments")
-    async def list_media_assessments(case_id: str):
+    async def list_media_assessments(request: Request, case_id: str):
         """Every adverse-media assessment recorded on the case,
         with its band, per-signal breakdown, and pinned scorer /
         taxonomy / profile versions."""
         case_id_var.set(case_id)
+        _read(request, case_id, "media")
         return {
             "case_id": case_id,
             "assessments": [
@@ -1355,9 +1732,12 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/cases/{case_id}/media/assessments/{assessment_id}")
-    async def get_media_assessment(case_id: str, assessment_id: str):
+    async def get_media_assessment(
+        request: Request, case_id: str, assessment_id: str
+    ):
         """One assessment in detail."""
         case_id_var.set(case_id)
+        _read(request, case_id, "media")
         return services.media.get_assessment(
             case_id, assessment_id
         ).model_dump(mode="json")
@@ -1386,11 +1766,12 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/cases/{case_id}/model-ledger")
-    async def case_model_ledger(case_id: str):
+    async def case_model_ledger(request: Request, case_id: str):
         """Every priced model call recorded for the case, in call
         order — profile, model, tokens and their basis, the unit
         prices applied, and the exact cost of each call."""
         case_id_var.set(case_id)
+        _read(request, case_id, "ledger")
         if services.store.get_case(case_id) is None:
             raise CaseNotFoundError(case_id)
         entries = services.store.list_call_entries(case_id)
@@ -1400,24 +1781,31 @@ def create_app(services: Services | None = None) -> FastAPI:
         }
 
     @app.get("/cases/{case_id}/model-costs")
-    async def case_model_costs(case_id: str):
+    async def case_model_costs(request: Request, case_id: str):
         """The case's drafting-cost rollup: totals by purpose and
         by profile, the budget position, and how many budget
         refusals the case has recorded."""
         case_id_var.set(case_id)
+        _read(request, case_id, "ledger")
         if services.store.get_case(case_id) is None:
             raise CaseNotFoundError(case_id)
         return services.gateway.case_rollup(case_id)
 
     @app.get("/model-costs/daily")
-    async def model_costs_daily():
+    async def model_costs_daily(request: Request):
         """The portfolio rollup: every ledgered call grouped by
-        day and profile — calls, tokens, and exact cost."""
+        day and profile — calls, tokens, and exact cost. R18: a
+        portfolio surface — officer, auditor, system."""
+        _portfolio(request, "daily_costs")
         return {"rows": services.gateway.portfolio_rollup()}
 
     # --- management reporting (R17): derived read-models --------
+    # R18: report reads are portfolio-level — the BSA officer,
+    # the auditor, and the system (derivations) only. An analyst
+    # identity is refused 403 naming the reports family.
     @app.get("/reports/pack")
     async def report_pack(
+        request: Request,
         as_of: date | None = None,
         window_start: date | None = None,
         window_end: date | None = None,
@@ -1428,6 +1816,7 @@ def create_app(services: Services | None = None) -> FastAPI:
         and operations. A pure read — the pack is derived from
         the stored artefacts at the named date, content-addressed,
         and reproducible; building it writes nothing."""
+        _portfolio(request, "reports")
         pack = services.reports.build_pack(
             as_of=as_of or date.today(),
             window_start=window_start,
@@ -1436,15 +1825,19 @@ def create_app(services: Services | None = None) -> FastAPI:
         return pack.model_dump(mode="json")
 
     @app.get("/reports/queue-ageing")
-    async def report_queue_ageing(as_of: date | None = None):
+    async def report_queue_ageing(
+        request: Request, as_of: date | None = None
+    ):
         """The queue-ageing section alone: open cases by status
         x age bucket, ageing by rule and severity, the oldest
         cases, and the two human-wait queues aged separately."""
+        _portfolio(request, "reports")
         pack = services.reports.build_pack(as_of=as_of or date.today())
         return pack.queue_ageing.model_dump(mode="json")
 
     @app.get("/reports/clock-board")
     async def report_clock_board(
+        request: Request,
         as_of: date | None = None,
         window_start: date | None = None,
         window_end: date | None = None,
@@ -1452,6 +1845,7 @@ def create_app(services: Services | None = None) -> FastAPI:
         """The clock-board section alone: filing and continuing
         clocks by state, the overdue list, and deadline
         performance over the window."""
+        _portfolio(request, "reports")
         pack = services.reports.build_pack(
             as_of=as_of or date.today(),
             window_start=window_start,
@@ -1460,19 +1854,23 @@ def create_app(services: Services | None = None) -> FastAPI:
         return pack.clock_board.model_dump(mode="json")
 
     @app.get("/reports/rubber-stamp")
-    async def report_rubber_stamp(as_of: date | None = None):
+    async def report_rubber_stamp(
+        request: Request, as_of: date | None = None
+    ):
         """The rubber-stamp section alone (Law 8): draft-vs-final
         measurement for investigation records and SAR narratives,
         confirmation patterns, and decision-latency distributions.
         Measurements only — it scores nobody."""
+        _portfolio(request, "reports")
         pack = services.reports.build_pack(as_of=as_of or date.today())
         return pack.rubber_stamp.model_dump(mode="json")
 
     @app.get("/reports/ops")
-    async def report_ops(as_of: date | None = None):
+    async def report_ops(request: Request, as_of: date | None = None):
         """The operations section alone: typology volume by check
         and rule-pack version, screening outcomes by list version,
         quarantine counts, media bands, and model spend."""
+        _portfolio(request, "reports")
         pack = services.reports.build_pack(as_of=as_of or date.today())
         return pack.ops.model_dump(mode="json")
 

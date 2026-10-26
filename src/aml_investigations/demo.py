@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 
+from .access import AccessService, identity_for_actor
 from .evidence import EvidenceService
 from .intake import IntakeService, ListAlertFeed
 from .models import Alert, CaseStatus, Disposition, ListEntry, ListKind, ListSnapshot
@@ -99,6 +100,17 @@ def run_demo() -> dict:
         CaseStatus.AWAITING_ANALYST,
     ):
         case = workflow.transition(case.case_id, target=target, actor="investigation-service")
+    # R18: the case is assigned before the analyst works it —
+    # the recorded act (a chain item + audit event) every path
+    # makes when work is picked up. The duty supervisor assigns
+    # j.rivera, who then closes the case below.
+    access = AccessService(store, evidence=evidence, seal_store=store)
+    access.assign_case(
+        case.case_id,
+        assignee_id="j.rivera",
+        actor=identity_for_actor("duty.supervisor", "l2_reviewer"),
+    )
+    case = store.get_case(case.case_id)
     case = workflow.transition(
         case.case_id,
         target=CaseStatus.CLOSED,

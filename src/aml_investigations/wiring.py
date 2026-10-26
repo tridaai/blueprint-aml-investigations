@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .access import AccessService
 from .approval import SarApprovalService
 from .clocks import RegulatoryClockService
 from .config import Settings, load_settings
@@ -71,6 +72,11 @@ class Services:
     media: AdverseMediaService
     gateway: ModelGateway
     reports: ReportingService
+    # R18: the access service is optional in the dataclass so
+    # hand-built stacks (unit tests of a single service) keep
+    # their old shape; production wiring always builds it, and
+    # the API/CLI enforce through it whenever it is present.
+    access: AccessService | None = None
 
 
 def build_services(settings: Settings | None = None) -> Services:
@@ -223,6 +229,12 @@ def build_services(settings: Settings | None = None) -> Services:
         ledger_store=store,
         quarantine=quarantine,
     )
+    # R18: access control — one check module in front of case
+    # data, enforced by the API layer and the CLI. It writes
+    # assignment acts through the evidence funnel (which brings
+    # the sealed-case rule with it) and records denials on the
+    # audit log.
+    access = AccessService(store, evidence=evidence, seal_store=store)
     return Services(
         settings=settings,
         store=store,
@@ -249,4 +261,5 @@ def build_services(settings: Settings | None = None) -> Services:
         media=media,
         gateway=gateway,
         reports=reports,
+        access=access,
     )

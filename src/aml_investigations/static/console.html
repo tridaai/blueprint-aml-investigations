@@ -193,6 +193,13 @@ function errText(result) {
 }
 async function api(method, url, body) {
   const opts = { method: method, headers: {} };
+  /* R18: reads carry the console's identity too — case access
+     is role-scoped, and a case outside the signed-in analyst's
+     scope simply does not appear in their queue. With no
+     identity set, no headers are sent and case reads answer
+     the not-found shape, which the views render as empty. */
+  if (identity.name) opts.headers["x-caller-id"] = identity.name;
+  if (identity.role) opts.headers["x-caller-role"] = identity.role;
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
