@@ -1497,6 +1497,95 @@ roles read across, assignment and reassignment recorded and
 immediately effective, reporting under officer and auditor
 identities.
 
+## The red team (R19) — the guarantees, attacked
+
+R19 adds no feature. It attacks the guarantees the earlier
+rounds claim, in six families, and treats every broken
+guarantee as a defect in the owning module — the attack
+stays as a regression test (`tests/test_redteam_r19.py`)
+and, for 20 of the attacks, as a graded eval counter
+(Scenario 22, one zero-tolerance counter per family).
+
+**Grounding is per-element now.** Both verifiers (the SAR
+narrative verifier and the record gate) grounded a
+statement's figures in the *union* of its citations' tokens:
+any figure appearing anywhere in the cited material passed.
+The transposition family — amounts swapped between two
+cited transactions, a date moved between them, one
+counterparty's name attached to another's transaction, a
+subject identifier altered by one digit, a total restated
+as the sum of a subset — passed or failed on that union.
+The fix is one shared function,
+`composer.grounding_problems`, which resolves each citation
+to a `CitedElement` and checks: figures ground under their
+own key inside one element (recursive key search, numeric-
+aware comparison, a `field:`-citation tail counts as its
+key); text values appear inside one element, never
+assembled across elements; a statement citing two or more
+transaction elements whose facts come exclusively from
+different ones is a transposition, named as such (an
+aggregate statement restating a computed finding escapes
+through its single common element); and a number presented
+with total language must be carried *as a total* by a cited
+element — a component amount never grounds a total. One
+exception is deliberate: a number the statement also
+carries as a named, grounded figure of its own (a profile's
+expected monthly amount inside a sentence that happens to
+use the word "totalling") is not re-judged as a total.
+
+**The quarantine sentence boundary.** Spans ran to the
+first sentence-ending punctuation, which an abbreviation's
+full stop ("e.g.") or a full stop after the instruction
+defeated — the dictated figure sat in the next "sentence",
+outside every span, and groundable. A sentence now ends
+only at a stop followed by whitespace and a capital, digit,
+or quote, or at end of text (abbreviations and decimal
+points no longer end a span), and a dedicated
+`output.figure_dictation` pattern fences a dictated figure
+standing in its own sentence. Pattern pack `2026.10.2`.
+
+**Clock nonsense is named, not verdicted.** The clock
+derivation silently absorbed payload dates that cannot be
+true: detection in the future read as a calm on-track clock,
+and a closing disposition decided *before* detection ended
+the filing clock `closed_no_file`, presenting a backdated
+record as the case's no-file documentation.
+`RegulatoryClockService` now names `detection_date_in_future`,
+`disposition_predates_detection`, and
+`determination_predates_detection` as case violations, and a
+predated closing disposition is excluded from the no-file
+reading — the clock stays live against its deadline.
+
+**Gate acts are serialised.** Disposition, review, and
+approval are check-then-act sequences over store reads that
+return detached copies; none held a lock, so concurrent
+duplicates all passed their checks and all landed. Each
+gate service now serialises its acts on a per-service
+`threading.RLock` (re-entrant because the scheduler tick
+calls the manual open per case); the loser of a race
+re-reads under the lock and meets the gate's own refusal —
+or, for a review open, receives the review the winner
+opened. The serialisation boundary is the single app
+process, which is the deployment's shape; the stores'
+append-only, insert-once discipline bounds the rest.
+Separately, `AccessService.assign_case` wrote the new
+assignee *before* the evidence funnel's sealed-case
+backstop refused the chain item — a half-applied act on a
+sealed case; the sealed check now runs before any write,
+mirroring the gates' ordering.
+
+**What held.** Chain reorder, duplicate-with-new-seq, and
+tail truncation each break `verify_chain` by name; a seal
+manifest with one item's hash replaced by another's fails
+export verification; an analyst assigned after sealing is
+refused the custody families; reassignment is re-checked at
+write time (`not_assignee`); and a 300-probe denial flood
+leaves the append-only denial audit exact — every probe
+recorded, an interleaved portfolio denial preserved at its
+position. The denial record has no bound by design: one
+audit event per probe, growing linearly, which is the BSA
+audit posture; retention is a deployment decision.
+
 ## Round map (20)
 
 R1 core: case model, state machine, ports, intake, evidence store

@@ -60,7 +60,7 @@ Or use the full stack (app + PostgreSQL + SeaweedFS evidence store):
 docker compose up --build
 ```
 
-## What is built at this round (R18 of 20)
+## What is built at this round (R19 of 20)
 
 - **Case model + LangGraph state machine** — states `opened →
   assembling → investigating → awaiting_analyst → closed /
@@ -518,9 +518,64 @@ docker compose up --build
   the refusal shape byte-for-byte with the nonexistent-case
   shape, and reconciles every refusal against the denial
   record — all zero-tolerance.
+- **The red team (R19)** — a full adversarial pass over the
+  system's own guarantees: 26 attacks in
+  `tests/test_redteam_r19.py`, 20 of them graded as eval
+  Scenario 22 with a zero-tolerance counter per family. Five
+  defect classes were found and fixed. (1) *Union grounding*:
+  both verifiers grounded a statement's figures in the union
+  of its citations' tokens, so facts could be transposed
+  between cited elements — amounts swapped between
+  transactions, a date moved, a counterparty's name attached
+  to another's transaction, a total restated as the sum of a
+  subset. Figures now bind to their own cited element: by
+  key, per element, with transposition and total-language
+  checks in `composer.grounding_problems`, used by both the
+  SAR verifier and the record gate. (2) *The punctuation
+  split*: the quarantine scanner's spans ended at any full
+  stop, so an abbreviation ("e.g.") or a second sentence let
+  a dictated figure escape the fence; a sentence now ends
+  only at a stop followed by whitespace and a capital, digit,
+  or quote — or at end of text — and a dictated-figure pattern
+  fences the classic split payloads (pattern pack
+  `2026.10.2`). (3) *Clock nonsense*: a detection date in
+  the future, a closing disposition decided before
+  detection, and a continuing determination predating its
+  prior case's detection are now named violations
+  (`detection_date_in_future`,
+  `disposition_predates_detection`,
+  `determination_predates_detection`), and a predated closing
+  disposition no longer ends the filing clock as a documented
+  no-file decision. (4) *Half-applied assignment*: assigning
+  a sealed case raised the sealed refusal *after* the new
+  assignee had already been written to the case record; the
+  sealed check now runs before any write. (5) *Gate races*:
+  the disposition, continuing-review, and SAR-approval acts
+  were unlocked check-then-act sequences — a concurrent
+  duplicate disposition landed twice, a scheduler tick and a
+  manual open both opened a review for one cycle, and two
+  approvers both decided one narrative version. The acts now
+  serialise on a per-service gate lock, and the loser meets
+  the gate's own refusal. Held without change: chain
+  reordering, duplication, and tail truncation (each breaks
+  verification by name), a seal manifest with an item hash
+  swapped for another's, custody families against a
+  post-sealing assignee, reassignment honoured at write
+  time, and the denial audit under a 300-probe flood — the
+  record is append-only with one audit event per probe and
+  no bound by design; that linear growth is the BSA audit
+  posture, and retention is a deployment decision. The gate
+  locks serialise within the single app process, which is
+  the deployment's shape; the stores' append-only,
+  insert-once discipline bounds the rest. One R10 control
+  test was openly re-scoped: its poisoned statement was
+  rephrased without total language, because a total-shaped
+  restatement of a quarantined figure is now refused at the
+  gate on any stack — the control still isolates exactly the
+  mask's own work.
 
-The rest — the red team and release hardening — lands in
-R19–R20 per the round map in `docs/architecture.md`.
+The rest — release hardening — lands in R20 per the round
+map in `docs/architecture.md`.
 
 ## Configuration
 
@@ -557,7 +612,7 @@ server available:
 
 ```bash
 AML_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5433/aml_parity make test
-# the entire suite on the Postgres adapter — same 426 passes
+# the entire suite on the Postgres adapter — same 452 passes
 DATABASE_URL=postgresql://postgres@127.0.0.1:5433/aml_parity make prod-smoke
 # the real app on a fresh database, 20 lifecycle steps over HTTP
 AML_EVAL_DATABASE_URL=postgresql://postgres@127.0.0.1:5433/aml_parity make evals
@@ -618,8 +673,14 @@ positive paths failing (0), cross-assignee case reads leaking
 read-only-role writes accepted (0), artefact-family
 restrictions bypassed (0), exports taken by a non-officer
 (0), CLI paths bypassing the access policy (0), access
-denials left unrecorded (0), and access positive paths
-failing (0). With a Postgres server provided,
+denials left unrecorded (0), access positive paths
+failing (0), transposed narrative facts verified (0),
+transposed record facts verified (0), split payloads
+grounding a figure (0), chain or export tampering passing
+undetected (0), clock nonsense left unnamed (0),
+sealed-case assignments applied (0), denial records lost
+under flooding (0), concurrent duplicate gate acts landing
+(0), and red-team positive paths failing (0). With a Postgres server provided,
 the gate adds: Postgres migration failures (0), production
 smoke step failures (0), and suite outcome gaps between the
 Postgres and default profiles (0).
@@ -660,7 +721,7 @@ Postgres and default profiles (0).
   text and acts on it only through the same gated routes.
 - The Postgres production profile is verified (R16, and
   re-verified every round since): the full test suite passes
-  unchanged on PostgreSQL 16 (426 tests as of R18,
+  unchanged on PostgreSQL 16 (452 tests as of R19,
   parity-graded in the eval gate), the migrations apply and
   re-run cleanly on an empty database, and the production
   smoke walks a case end to end over HTTP on a fresh database.
