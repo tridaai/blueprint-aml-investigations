@@ -96,6 +96,12 @@ Zero-tolerance counters:
   - altered re-deliveries swallowed (R15) ........ must be 0
   - profile name conflicts merged (R15) .......... must be 0
   - trap positive paths failing (R15) ............ must be 0
+  - Postgres migration failures (R16) ............ must be 0
+  - production smoke step failures (R16) ......... must be 0
+  - suite outcome gaps, Postgres vs default (R16). must be 0
+    (scenario 19 runs only when AML_EVAL_DATABASE_URL or
+    DATABASE_URL names a server; otherwise it is skipped and
+    the skip is counted in pg_checks_skipped, never silent)
 
 Exit code 0 iff the gate passes.
 """
@@ -103,6 +109,7 @@ Exit code 0 iff the gate passes.
 from __future__ import annotations
 
 import base64
+import os
 import sys
 import tempfile
 from datetime import date, datetime, time, timedelta, timezone  # noqa: E402
@@ -5028,7 +5035,158 @@ def main() -> int:
     ):
         counters["trap_profile_conflict_merged"] += 1
 
-    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9+R10+R11+R12+R13+R14+R15 counters")
+    # -- Scenario 19 (R16): the Postgres production profile. ------------
+    # Everything above runs on the in-memory double. This scenario
+    # grades the production store: migrations on an empty Postgres
+    # database (fresh apply + idempotent re-run), the production
+    # smoke over HTTP against a fresh database, and full-suite
+    # parity — the entire pytest suite run twice, once per profile,
+    # with identical outcomes for every shared test. It needs a
+    # server: AML_EVAL_DATABASE_URL (or DATABASE_URL). Without one
+    # the scenario is skipped and the skip is counted — named in
+    # the gate output, never silent; the zero-tolerance counters
+    # stay 0 only because nothing was claimed.
+    counters["pg_migration_failures"] = 0
+    counters["prod_smoke_step_failures"] = 0
+    counters["pg_suite_parity_gap"] = 0
+    counters["pg_checks_skipped"] = 0
+    _pg_url = os.environ.get("AML_EVAL_DATABASE_URL") or os.environ.get(
+        "DATABASE_URL"
+    )
+    if not _pg_url:
+        counters["pg_checks_skipped"] = 1
+        print(
+            "scenario 19 (postgres profile): SKIPPED — no "
+            "AML_EVAL_DATABASE_URL/DATABASE_URL provided (counted)"
+        )
+    else:
+        import subprocess as _subprocess
+        import uuid as _uuid
+        import xml.etree.ElementTree as _ET
+
+        import psycopg as _psycopg
+
+        from aml_investigations.migrations import (
+            run_migrations as _run_migrations,
+        )
+
+        _repo_root = Path(__file__).resolve().parents[1]
+        _pg_tmp = Path(tempfile.mkdtemp(prefix="aml-eval-pg-"))
+
+        # 1) Migrations: empty database, apply all, re-run applies none.
+        _mig_db = f"aml_eval_mig_{_uuid.uuid4().hex[:12]}"
+        _admin = _psycopg.connect(_pg_url, autocommit=True)
+        try:
+            _admin.execute(
+                f'CREATE DATABASE "{_mig_db}" TEMPLATE template0'
+                " ENCODING 'UTF8'"
+            )
+            _mig_dsn = _pg_url.rsplit("/", 1)[0] + f"/{_mig_db}"
+            _mig_conn = _psycopg.connect(_mig_dsn)
+            try:
+                _first = _run_migrations(
+                    _mig_conn, _repo_root / "migrations", "postgres", "format"
+                )
+                _second = _run_migrations(
+                    _mig_conn, _repo_root / "migrations", "postgres", "format"
+                )
+                if _first != [f"{i:04d}" for i in range(1, 12)] or _second != []:
+                    counters["pg_migration_failures"] += 1
+            finally:
+                _mig_conn.close()
+            _admin.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+                " WHERE datname = %s AND pid <> pg_backend_pid()",
+                (_mig_db,),
+            )
+            _admin.execute(f'DROP DATABASE IF EXISTS "{_mig_db}"')
+        except Exception:
+            counters["pg_migration_failures"] += 1
+        finally:
+            _admin.close()
+
+        # 2) The production smoke, as its own process, on a fresh DB.
+        _smoke_env = dict(os.environ)
+        _smoke_env["DATABASE_URL"] = _pg_url
+        _smoke_env["TMPDIR"] = str(_pg_tmp)
+        try:
+            _smoke = _subprocess.run(
+                [sys.executable, "scripts/prod_smoke.py"],
+                cwd=_repo_root,
+                env=_smoke_env,
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+            _summary = [
+                ln for ln in _smoke.stdout.splitlines() if ln.startswith("SMOKE:")
+            ]
+            if not _summary:
+                counters["prod_smoke_step_failures"] += 1
+            else:
+                _done, _total = _summary[-1].split()[1].split("/")
+                counters["prod_smoke_step_failures"] += int(_total) - int(_done)
+        except Exception:
+            counters["prod_smoke_step_failures"] += 1
+
+        # 3) Suite parity: same suite, both profiles, junit outcomes.
+        def _suite_outcomes(env_extra: dict, drop: tuple) -> dict:
+            env = dict(os.environ)
+            for key in drop:
+                env.pop(key, None)
+            env.update(env_extra)
+            env["TMPDIR"] = str(_pg_tmp)
+            xml_path = _pg_tmp / f"junit-{len(env_extra)}.xml"
+            _subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "-q",
+                    "--junitxml",
+                    str(xml_path),
+                ],
+                cwd=_repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=2400,
+            )
+            outcomes = {}
+            for case in _ET.parse(xml_path).getroot().iter("testcase"):
+                node = f"{case.get('classname')}::{case.get('name')}"
+                if "test_postgres_profile" in node:
+                    continue  # profile-conditional by design (R16)
+                outcome = "passed"
+                for child in case:
+                    if child.tag in ("failure", "error", "skipped"):
+                        outcome = child.tag
+                outcomes[node] = outcome
+            return outcomes
+
+        try:
+            _default = _suite_outcomes({}, ("AML_TEST_DATABASE_URL",))
+            _pg = _suite_outcomes(
+                {"AML_TEST_DATABASE_URL": _pg_url}, ("AML_TEST_DATABASE_URL",)
+            )
+            _shared = set(_default) & set(_pg)
+            counters["pg_suite_parity_gap"] += len(
+                set(_default) ^ set(_pg)
+            )
+            counters["pg_suite_parity_gap"] += sum(
+                1 for node in _shared if _default[node] != _pg[node]
+            )
+            counters["pg_suite_tests_compared"] = len(_shared)
+        except Exception:
+            counters["pg_suite_parity_gap"] += 1
+        print(
+            "scenario 19 (postgres profile): migrations graded, smoke "
+            f"failures {counters['prod_smoke_step_failures']}, suite "
+            f"parity gap {counters['pg_suite_parity_gap']} over "
+            f"{counters.get('pg_suite_tests_compared', 0)} shared tests"
+        )
+
+    print("Blueprint #15 evals — R1+R2+R3+R4+R5+R6+R7+R8+R9+R10+R11+R12+R13+R14+R15+R16 counters")
     for key, value in counters.items():
         print(f"  {key}: {value}")
     zero_tolerance = [
@@ -5133,6 +5291,9 @@ def main() -> int:
         "trap_altered_batch_swallowed",
         "trap_profile_conflict_merged",
         "trap_positive_paths_failed",
+        "pg_migration_failures",
+        "prod_smoke_step_failures",
+        "pg_suite_parity_gap",
     ]
     passed = all(counters[k] == 0 for k in zero_tolerance) and counters["cases_opened"] == len(ALERTS)
     print("GATE: PASS" if passed else "GATE: FAIL")
