@@ -46,6 +46,7 @@ transition table remains the single source of which moves exist.
 
 from __future__ import annotations
 
+import threading
 from datetime import timedelta
 
 from .errors import CaseNotFoundError, DispositionRefusedError
@@ -254,6 +255,14 @@ class DispositionService:
         self._evidence = evidence
         self._workflow = workflow
         self._seals = seal_store
+        # R19: the gate's acts are check-then-act sequences (read
+        # the case, run the gate's checks, transition, record).
+        # Two concurrent submissions could both read the pre-gate
+        # state and both land — two dispositions for one gate
+        # pass. The acts serialise on this lock within the app
+        # process; the loser then re-reads the case under the
+        # lock and meets the gate's own refusal.
+        self._gate_lock = threading.RLock()
 
     # -- refusals -----------------------------------------------------
 
@@ -302,6 +311,38 @@ class DispositionService:
     # -- dispositions ---------------------------------------------------
 
     def record_disposition(
+        self,
+        case_id: str,
+        *,
+        analyst_id: str,
+        analyst_role: str,
+        outcome: DispositionOutcome,
+        rationale_codes: list[str],
+        record_id: str,
+        record_version: int,
+        note: str = "",
+        review_period_days: int | None = None,
+        missing_evidence: list[str] | None = None,
+    ) -> DispositionRecord:
+        """Record one analyst disposition at the gate. The act is
+        serialised on the service's gate lock (R19): a concurrent
+        duplicate submission lands exactly once, and the second
+        caller meets the gate's refusal over the landed state."""
+        with self._gate_lock:
+            return self._record_disposition(
+                case_id,
+                analyst_id=analyst_id,
+                analyst_role=analyst_role,
+                outcome=outcome,
+                rationale_codes=rationale_codes,
+                record_id=record_id,
+                record_version=record_version,
+                note=note,
+                review_period_days=review_period_days,
+                missing_evidence=missing_evidence,
+            )
+
+    def _record_disposition(
         self,
         case_id: str,
         *,
@@ -530,6 +571,27 @@ class DispositionService:
     # -- confirmations --------------------------------------------------
 
     def confirm_disposition(
+        self,
+        case_id: str,
+        *,
+        confirmer_id: str,
+        confirmer_role: str,
+        outcome: ConfirmationOutcome,
+        note: str = "",
+    ) -> DispositionConfirmation:
+        """Confirm (or decline) a pending adverse closure. Same
+        serialisation as the disposition act (R19): a concurrent
+        duplicate confirmation lands exactly once."""
+        with self._gate_lock:
+            return self._confirm_disposition(
+                case_id,
+                confirmer_id=confirmer_id,
+                confirmer_role=confirmer_role,
+                outcome=outcome,
+                note=note,
+            )
+
+    def _confirm_disposition(
         self,
         case_id: str,
         *,

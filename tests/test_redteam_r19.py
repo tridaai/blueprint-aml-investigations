@@ -721,7 +721,7 @@ def test_disposition_decided_before_detection_does_not_document_no_file(
         actor="test",
         disposition=Disposition(
             analyst=ANALYST,
-            decision="close_no_action",
+            decision="close",
             reason_code="NO_SUSPICIOUS_ACTIVITY_IDENTIFIED",
             rationale="attack fixture: predated closing record",
         ),
@@ -938,8 +938,7 @@ def test_tick_and_manual_review_open_racing_open_exactly_one_review(
     try:
         results, errors = _run_pair(
             lambda: stack.reviews.open_review(
-                case_id, as_of=as_of, actor="officer-1",
-                actor_role="bsa_officer",
+                case_id, actor="officer-1"
             ),
             lambda: stack.reviews.open_due_reviews(
                 as_of=as_of, actor="scheduler"

@@ -50,6 +50,8 @@ ready to be sealed — nothing here transmits anything anywhere.
 
 from __future__ import annotations
 
+import threading
+
 from .dispositions import ANALYST_ROLES, SYSTEM_ACTORS, canonical_person_id
 from .errors import ApprovalRefusedError, CaseNotFoundError
 from .evidence import EvidenceService, ensure_case_mutable
@@ -117,6 +119,13 @@ class SarApprovalService:
         self._evidence = evidence
         self._workflow = workflow
         self._seals = seal_store
+        # R19: the decision is check-then-act (read the case,
+        # check no decision stands, verify, transition, record).
+        # Two approvers racing could both pass the checks and
+        # decide the same narrative version twice. The act
+        # serialises on this lock within the app process; the
+        # loser re-reads and meets the already_decided refusal.
+        self._gate_lock = threading.RLock()
 
     # -- refusals -----------------------------------------------------
 
@@ -153,7 +162,30 @@ class SarApprovalService:
     ) -> SarApproval:
         """Record the second person's decision on the case's
         current SAR narrative. See the module docstring for the
-        gate's rules; every one of them refuses by name."""
+        gate's rules; every one of them refuses by name. The act
+        is serialised on the service's gate lock (R19), so a
+        narrative version is decided exactly once even when two
+        approvers submit concurrently."""
+        with self._gate_lock:
+            return self._decide_narrative(
+                case_id,
+                approver_id=approver_id,
+                approver_role=approver_role,
+                outcome=outcome,
+                reason_codes=reason_codes,
+                note=note,
+            )
+
+    def _decide_narrative(
+        self,
+        case_id: str,
+        *,
+        approver_id: str,
+        approver_role: str,
+        outcome: ApprovalOutcome,
+        reason_codes: list[str] | None = None,
+        note: str = "",
+    ) -> SarApproval:
         case = self._require_case(case_id)
         ensure_case_mutable(self._seals, case_id)
         actor = f"analyst:{approver_id}"

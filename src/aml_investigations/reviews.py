@@ -51,6 +51,7 @@ answers it, under the same discipline as everything upstream:
 from __future__ import annotations
 
 import json
+import threading
 from datetime import date, datetime, timezone
 
 from .clocks import RegulatoryClockService
@@ -176,6 +177,13 @@ class ContinuingReviewService:
         # mask quarantined spans like every other verifier.
         self._quarantine = quarantine
         self._resolver = CitationResolver(store, evidence)
+        # R19: opening a review is check-then-act (is a review
+        # operative for the cycle? then write). A scheduler tick
+        # and a manual open racing could both pass the check and
+        # both open a review for one cycle. The open and
+        # disposition acts serialise on this lock within the app
+        # process; open_due_reviews re-enters it per case.
+        self._gate_lock = threading.RLock()
 
     # -- refusals / lookups ------------------------------------------
 
@@ -738,6 +746,15 @@ class ContinuingReviewService:
     def open_review(
         self, case_id: str, *, actor: str
     ) -> ContinuingReview:
+        """Open the current cycle's review. Serialised on the
+        service's gate lock (R19): a scheduler tick and a manual
+        open racing on one cycle land exactly one review."""
+        with self._gate_lock:
+            return self._open_review(case_id, actor=actor)
+
+    def _open_review(
+        self, case_id: str, *, actor: str
+    ) -> ContinuingReview:
         """Open the current cycle's review: assemble the window's
         activity over the linked case's current investigation
         record, verify it at the gate, and store it on the case's
@@ -911,6 +928,31 @@ class ContinuingReviewService:
     # -- the disposition ----------------------------------------------------
 
     def record_review_disposition(
+        self,
+        case_id: str,
+        review_id: str,
+        *,
+        analyst_id: str,
+        analyst_role: str,
+        outcome: ReviewOutcome,
+        rationale_codes: list[str],
+        note: str = "",
+    ) -> ContinuingReviewDisposition:
+        """Record the analyst's disposition of one review.
+        Serialised on the service's gate lock (R19), like the
+        open: a concurrent duplicate disposition lands once."""
+        with self._gate_lock:
+            return self._record_review_disposition(
+                case_id,
+                review_id,
+                analyst_id=analyst_id,
+                analyst_role=analyst_role,
+                outcome=outcome,
+                rationale_codes=rationale_codes,
+                note=note,
+            )
+
+    def _record_review_disposition(
         self,
         case_id: str,
         review_id: str,
