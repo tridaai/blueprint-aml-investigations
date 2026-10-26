@@ -14,7 +14,11 @@ same law seen from the other side:
   analyst who recorded the ``escalate_sar`` disposition that
   routed the case, and may not be the actor who drafted the
   narrative. Either identity match is a named refusal, not a
-  warning. There is no override.
+  warning. There is no override. Identity matches are computed
+  on the canonical person id (``canonical_person_id`` in
+  dispositions.py): dual control binds the person, so the
+  drafter presenting with a re-cased spelling of their id and
+  an approver's role is still the drafter.
 - **Only a verified narrative may be decided.** The gate reads
   the narrative's derived standing from the drafting service: a
   draft that has not passed the citation verifier, or whose
@@ -46,7 +50,7 @@ ready to be sealed — nothing here transmits anything anywhere.
 
 from __future__ import annotations
 
-from .dispositions import ANALYST_ROLES, SYSTEM_ACTORS
+from .dispositions import ANALYST_ROLES, SYSTEM_ACTORS, canonical_person_id
 from .errors import ApprovalRefusedError, CaseNotFoundError
 from .evidence import EvidenceService, ensure_case_mutable
 from .logging_config import get_logger
@@ -155,7 +159,7 @@ class SarApprovalService:
         actor = f"analyst:{approver_id}"
 
         approver = approver_id or ""
-        if not approver.strip() or approver.strip().lower() in SYSTEM_ACTORS:
+        if not approver.strip() or canonical_person_id(approver) in SYSTEM_ACTORS:
             raise self._refuse(
                 case_id,
                 approver or "anonymous",
@@ -229,7 +233,14 @@ class SarApprovalService:
                 "routed this case to SAR drafting is not on record; "
                 "dual control cannot be checked, so nothing is decided",
             )
-        if approver == routing.analyst_id:
+        # Dual control is about persons: the comparisons run on
+        # the canonical person id (see dispositions.py), so a
+        # re-cased or re-spaced spelling of the dispositioner's
+        # or drafter's own id is still that person, whatever role
+        # they present at this gate.
+        if canonical_person_id(approver) == canonical_person_id(
+            routing.analyst_id
+        ):
             raise self._refuse(
                 case_id,
                 actor,
@@ -239,7 +250,9 @@ class SarApprovalService:
                 "the dispositioning analyst from approving the "
                 "narrative — a second person must decide it",
             )
-        if approver == narrative.drafted_by:
+        if canonical_person_id(approver) == canonical_person_id(
+            narrative.drafted_by
+        ):
             raise self._refuse(
                 case_id,
                 actor,

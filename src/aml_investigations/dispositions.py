@@ -31,7 +31,11 @@ A disposition here is an artefact, not a form field:
   close the case: it parks it in ``pending_confirmation`` until an
   L2 reviewer — a different named analyst — confirms. The
   dispositioning analyst confirming their own closure is refused
-  mechanically. A decline sends the case back to investigation.
+  mechanically. Identity is compared as a person, not as a string:
+  ids compare in canonical form (case-folded, whitespace
+  collapsed — ``canonical_person_id``), so re-casing or re-spacing
+  one's own id does not mint a "second person". A decline sends
+  the case back to investigation.
 
 Every disposition and confirmation is stored append-only *and*
 captured as a hash-chained evidence item on the case, so the
@@ -81,6 +85,22 @@ RATIONALE_VOCABULARY_VERSION = "2026.10.1"
 #: them; confirmations only by the L2 role.
 ANALYST_ROLES = frozenset({"analyst", "senior_analyst", "l2_reviewer"})
 L2_ROLE = "l2_reviewer"
+
+def canonical_person_id(person_id: str) -> str:
+    """The canonical form of a person id — the identity the gates
+    compare. Person ids are hand-typed at the console, the CLI, and
+    the API, and the same person types theirs differently from one
+    sitting to the next ('E.Okafor', ' e.okafor ', 'e.  okafor').
+    Dual control is about persons, not strings: two spellings of
+    one id are one person, and a raw string comparison would let
+    a dispositioning analyst confirm their own closure — or
+    approve their own narrative — by re-casing their id. Every
+    identity comparison in the gates (this module and the SAR
+    approval gate) is made on this form: stripped, internal
+    whitespace collapsed, case-folded. The id is still *recorded*
+    exactly as presented; only comparison canonicalises."""
+    return " ".join((person_id or "").split()).casefold()
+
 
 #: Actors that are the system, not a person. A disposition from one
 #: of these is refused as anonymous_or_system_actor — the gate is a
@@ -261,7 +281,7 @@ class DispositionService:
     ) -> None:
         """The gate is a human gate: a named person with a coded role."""
         actor = actor_id or ""
-        if not actor.strip() or actor.strip().lower() in SYSTEM_ACTORS:
+        if not actor.strip() or canonical_person_id(actor) in SYSTEM_ACTORS:
             raise self._refuse(
                 case_id,
                 actor or "anonymous",
@@ -541,13 +561,17 @@ class DispositionService:
                 f"confirmation is second-line work: the confirmer's "
                 f"role must be {L2_ROLE}, not {confirmer_role}",
             )
-        if confirmer_id == pending.analyst_id:
+        if canonical_person_id(confirmer_id) == canonical_person_id(
+            pending.analyst_id
+        ):
             raise self._refuse(
                 case_id,
                 actor,
                 "self_confirmation",
                 "the analyst who dispositioned a case cannot confirm "
-                "their own closure — dual control means a second person",
+                "their own closure — dual control means a second "
+                "person, and identity is the person id in canonical "
+                "form, not the exact string it was typed as",
             )
 
         if outcome is ConfirmationOutcome.CONFIRMED:
