@@ -382,6 +382,40 @@ def _estimate_tokens(text: str) -> int:
     return max(1, -(-len(text) // 4))
 
 
+#: The fences the live prompt puts around the candidate statement.
+STATEMENT_OPEN = "<<<STATEMENT>>>"
+STATEMENT_CLOSE = "<<<END>>>"
+
+
+def finished_statement(text: str) -> str:
+    """A live completion's statement, with the prompt's own fences
+    taken off. Small models echo the fenced candidate back verbatim
+    (seen live with llama3.1 8B); the statement is what stands
+    between the fences. Unwrapping the envelope is not editing the
+    statement — anything left that still carries a fence is refused
+    by the gate, never repaired."""
+    text = text.strip()
+    if STATEMENT_OPEN in text:
+        inner = text.split(STATEMENT_OPEN, 1)[1]
+        if STATEMENT_CLOSE in inner:
+            inner = inner.split(STATEMENT_CLOSE, 1)[0]
+        text = inner.strip()
+    return text
+
+
+def scaffolding_problems(text: str) -> list[str]:
+    """Why a finished statement still is not one: empty text, or
+    prompt scaffolding (a fence marker) left inside it. Empty =
+    a statement. Figures are the figure gate's business, not this."""
+    if not text:
+        return ["the model returned no statement text"]
+    problems = []
+    for marker in (STATEMENT_OPEN, STATEMENT_CLOSE):
+        if marker in text:
+            problems.append(f"prompt scaffolding {marker!r} left in the text")
+    return problems
+
+
 def _prompt_for(draft: StatementDraft) -> str:
     """The live adapters' prompt: the draft's template, the exact
     values code computed for its slots, and the rendered candidate
@@ -404,9 +438,9 @@ def _prompt_for(draft: StatementDraft) -> str:
         f"{values_block}\n\n"
         "Candidate statement (the template rendered with the "
         "values):\n"
-        "<<<STATEMENT>>>\n"
+        f"{STATEMENT_OPEN}\n"
         f"{rendered}\n"
-        "<<<END>>>\n\n"
+        f"{STATEMENT_CLOSE}\n\n"
         "Return only the finished statement. You may polish the "
         "wording, but you must not introduce, alter, or drop any "
         "figure, date, name, or identifier: every number in your "
@@ -772,7 +806,16 @@ class ModelGateway:
             called_at=self._clock(),
         )
         self._ledger.add_call_entry(entry)
-        stray = ungrounded_figures(completion.text, draft.allowed)
+        text = finished_statement(completion.text)
+        problems = scaffolding_problems(text)
+        if problems:
+            raise ComposerRefusalError(
+                f"statement refused: {'; '.join(problems)} (profile "
+                f"{definition.profile_id!r}; the call is recorded "
+                "in the cost ledger — a refused statement still "
+                "cost what it cost)"
+            )
+        stray = ungrounded_figures(text, draft.allowed)
         if stray:
             raise ComposerRefusalError(
                 "statement would carry figure(s) not present in the "
@@ -782,7 +825,7 @@ class ModelGateway:
                 "in the cost ledger — a refused statement still "
                 "cost what it cost)"
             )
-        return completion.text
+        return text
 
     # -- budget -------------------------------------------------------
 

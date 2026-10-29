@@ -397,6 +397,46 @@ def test_ungrounded_live_text_refused_but_ledgered():
     assert entries[0].cost_usd == Decimal("0.00105")
 
 
+def in_boundary_composer(store, text_override):
+    gw = gateway(
+        store,
+        environ={"IN_BOUNDARY_MODEL_URL": "http://localhost:11434/v1"},
+        transport=StubTransport(
+            {"prompt_tokens": 100, "completion_tokens": 50},
+            text_override=text_override,
+        ),
+    )
+    return gw.composer_for(
+        "in-boundary", case_id="CASE-4", purpose="sar_draft"
+    )
+
+
+def test_echoed_prompt_fences_are_unwrapped():
+    # Seen live with llama3.1 8B: the model echoed the fenced
+    # candidate back, and the fences reached a verified SAR.
+    composer = in_boundary_composer(
+        InMemoryCaseStore(),
+        "<<<STATEMENT>>>\nA total of 9500.00 moved.\n<<<END>>>",
+    )
+    assert composer.compose(draft()) == "A total of 9500.00 moved."
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "A total of 9500.00 moved. <<<END>>>",
+        "<<<STATEMENT>>> <<<END>>>",
+        "   ",
+    ],
+)
+def test_scaffolding_or_empty_live_text_refused_but_ledgered(text):
+    store = InMemoryCaseStore()
+    composer = in_boundary_composer(store, text)
+    with pytest.raises(ComposerRefusalError):
+        composer.compose(draft())
+    assert len(store.list_call_entries("CASE-4")) == 1
+
+
 # ---------------------------------------------------------------------------
 # Budget: refusal before transport, recorded, offline unaffected.
 # ---------------------------------------------------------------------------
