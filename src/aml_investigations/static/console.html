@@ -228,10 +228,14 @@ function loadIdentity() {
   $("analyst-name").value = identity.name;
   if (identity.role) $("analyst-role").value = identity.role;
 }
-function saveIdentity() {
+async function saveIdentity() {
   identity.name = $("analyst-name").value.trim();
   identity.role = $("analyst-role").value;
   try { localStorage.setItem("aml-console-identity", JSON.stringify(identity)); } catch (e) { /* in-memory is enough */ }
+  /* Reads are identity-scoped (R18): what this caller may see changes
+     with who they are, so the queue and the open case reload now. */
+  await loadQueue();
+  if (SELECTED) await openCase(SELECTED);
 }
 function requireIdentity(box) {
   if (!identity.name || !identity.role) {
