@@ -37,6 +37,10 @@ an AML investigation agent into production inside a BSA/AML program.
 
 > **Work in progress** — this blueprint is built and passing its automated test and eval gates, but it has not yet finished hands-on local testing, and its companion blog post is not yet published. Expect changes. This notice comes off when both are done.
 
+<p><a href="https://trida.ai/blog/aml-investigation-agent-blueprint"><img src="https://geeytzpdwvjojoie.public.blob.vercel-storage.com/blog/1793589896855-cover.webp" alt="AML Investigation Agent Blueprint" width="600"></a></p>
+
+**Deep-dive:** [AML Investigation Agent Blueprint](https://trida.ai/blog/aml-investigation-agent-blueprint) — how a case file assembles itself around an alert, and the two human decisions that end it.
+
 ---
 
 ## Try it in 3 commands
